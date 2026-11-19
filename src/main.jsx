@@ -1,0 +1,715 @@
+import React, { useCallback, useEffect, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import { strToU8, zipSync } from 'fflate';
+import { supabase } from './lib/supabase';
+import {
+  LayoutDashboard, ClipboardList, Users, Package, Wrench, CalendarCheck,
+  LogOut, Bell, Search, Download, Plus, ChevronDown, ArrowLeft, Check,
+  Clock3, Settings, Box, TrendingUp, Menu, X, UserRound, Factory, BarChart3,
+  TriangleAlert, CircleDollarSign, Eye, EyeOff
+} from 'lucide-react';
+import './styles.css';
+
+const OPERATORS = ['AMRI', 'M. RIPAI', 'ERWIN', 'AGUS', 'SIGIT', 'HAFIDZ'];
+const MACHINES = ['VMC 850', 'VMC 650', 'KASUGA', 'HYUNDAI', 'FINISHING', 'GENTAP'];
+const ITEMS = ['72559', 'H122-AD1-9810', 'RUMAH KONIS', 'KLEM ATAS', 'KLEM SAMPING', 'MUR PENGIKAT', 'RING MUR PENGIKAT', 'POROS KLEM TENGAH', 'POROS KLEM SAMPING'];
+
+function downloadCsv(fileName, rows) {
+  const csv = rows.map(row => row.map(value => {
+    const text = String(value ?? '');
+    return `"${text.replaceAll('"', '""')}"`;
+  }).join(',')).join('\r\n');
+  downloadBlob(`${fileName}.csv`, `\uFEFF${csv}`, 'text/csv;charset=utf-8');
+}
+
+function downloadExcel(fileName, sheetName, rows) {
+  const escapeXml = value => String(value ?? '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&apos;');
+  const columnName = index => {
+    let name = '';
+    for (let value = index + 1; value; value = Math.floor((value - 1) / 26)) {
+      name = String.fromCharCode(65 + (value - 1) % 26) + name;
+    }
+    return name;
+  };
+  const cells = rows.map((row, rowIndex) => `<row r="${rowIndex + 1}">${row.map((value, columnIndex) => {
+    if (value === null || value === undefined || value === '') return '';
+    const address = `${columnName(columnIndex)}${rowIndex + 1}`;
+    if (typeof value === 'number' && Number.isFinite(value)) return `<c r="${address}"><v>${value}</v></c>`;
+    return `<c r="${address}" t="inlineStr"><is><t xml:space="preserve">${escapeXml(value)}</t></is></c>`;
+  }).join('')}</row>`).join('');
+  const safeSheetName = String(sheetName).replace(/[\\/*?:[\]]/g, '_').slice(0, 31) || 'Laporan';
+  const files = {
+    '[Content_Types].xml': strToU8('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+      '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'),
+    '_rels/.rels': strToU8('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'),
+    'xl/workbook.xml': strToU8('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      `<sheets><sheet name="${escapeXml(safeSheetName)}" sheetId="1" r:id="rId1"/></sheets></workbook>`),
+    'xl/_rels/workbook.xml.rels': strToU8('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'),
+    'xl/worksheets/sheet1.xml': strToU8('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>' +
+      cells + '</sheetData></worksheet>')
+  };
+  downloadBlob(`${fileName}.xlsx`, zipSync(files), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+}
+
+function downloadBlob(fileName, contents, type) {
+  const url = URL.createObjectURL(new Blob([contents], {type}));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function getWeekDates(weekValue) {
+  const match = /^(\d{4})-W(\d{2})$/.exec(weekValue);
+  if (!match) return {start: '', end: ''};
+  const year = Number(match[1]);
+  const week = Number(match[2]);
+  const januaryFourth = new Date(Date.UTC(year, 0, 4));
+  const dayOfWeek = januaryFourth.getUTCDay() || 7;
+  const monday = new Date(januaryFourth);
+  monday.setUTCDate(januaryFourth.getUTCDate() - dayOfWeek + 1 + (week - 1) * 7);
+  const sunday = new Date(monday);
+  sunday.setUTCDate(monday.getUTCDate() + 6);
+  return {
+    start: monday.toISOString().slice(0, 10),
+    end: sunday.toISOString().slice(0, 10)
+  };
+}
+
+function getLocalDateKey(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function formatAttendanceTimestamp(timestamp) {
+  if (!timestamp) return '—';
+  return `${new Date(timestamp).toLocaleString('id-ID', {
+    timeZone: 'Asia/Jakarta', dateStyle: 'medium', timeStyle: 'medium'
+  })} WIB`;
+}
+
+function mapRemoteRecord(table, row) {
+  if (table === 'attendance_records') {
+    return {
+      id: row.id, operator: row.operator_name, date: row.shift_date,
+      checkIn: row.check_in, checkOut: row.check_out, status: row.verification_status
+    };
+  }
+  return {
+    id: row.id, code: row.spk_code, operator: row.operator_name,
+    date: getLocalDateKey(new Date(row.created_at)), createdAt: row.created_at,
+    machine: row.machine, item: row.item_name, op: row.op_name,
+    oke: row.qty_oke, repair: row.qty_repair, ng: row.qty_ng,
+    status: row.verification_status, time: formatAttendanceTimestamp(row.created_at)
+  };
+}
+
+function useRemoteRecords(table) {
+  const [records,setRecords]=useState([]);
+  const [error,setError]=useState('');
+  const refresh=useCallback(async()=>{
+    const orderColumn=table==='attendance_records'?'shift_date':'created_at';
+    const {data,error:queryError}=await supabase.from(table).select('*').order(orderColumn,{ascending:false});
+    if(queryError){setError(queryError.message);return;}
+    setError('');
+    setRecords(data.map(row=>mapRemoteRecord(table,row)));
+  },[table]);
+
+  useEffect(()=>{
+    refresh();
+    const channel=supabase.channel(`live-${table}`)
+      .on('postgres_changes',{event:'*',schema:'public',table},refresh)
+      .subscribe(status=>{
+        if(status==='CHANNEL_ERROR')setError(`Koneksi realtime ${table} gagal.`);
+      });
+    return ()=>{supabase.removeChannel(channel);};
+  },[refresh,table]);
+
+  const rpc=useCallback(async(functionName,args)=>{
+    const {data,error:rpcError}=await supabase.rpc(functionName,args);
+    if(rpcError){setError(rpcError.message);return null;}
+    const row=Array.isArray(data)?data[0]:data;
+    if(!row){setError('Server tidak mengembalikan catatan yang tersimpan.');return null;}
+    setError('');
+    const record=mapRemoteRecord(table,row);
+    setRecords(current=>[record,...current.filter(item=>item.id!==record.id)]);
+    return record;
+  },[table]);
+
+  const setVerificationStatus=useCallback(async(id,status)=>{
+    const {data,error:updateError}=await supabase.from(table)
+      .update({verification_status:status,reviewed_at:new Date().toISOString()})
+      .eq('id',id).select('*').single();
+    if(updateError){setError(updateError.message);return false;}
+    setError('');
+    const record=mapRemoteRecord(table,data);
+    setRecords(current=>current.map(item=>item.id===id?record:item));
+    return true;
+  },[table]);
+
+  return {records,error,refresh,rpc,setVerificationStatus};
+}
+
+function SyncError({error}) {
+  return error?<div className="sync-error" role="alert">Sinkronisasi gagal: {error}</div>:null;
+}
+
+function Logo({ compact = false }) {
+  return <div className="brand">
+    <div className="brand-mark"><Factory size={compact ? 20 : 24}/></div>
+    {!compact && <div><strong>TPT</strong><span>PRODUCTION CONTROL</span></div>}
+  </div>;
+}
+
+function Modal({ title, children, onClose, wide = false }) {
+  return <div className="modal-backdrop" onMouseDown={onClose}>
+    <div className={`modal ${wide ? 'wide' : ''}`} onMouseDown={e => e.stopPropagation()}>
+      {title && <div className="modal-head"><h3>{title}</h3><button className="icon-btn" onClick={onClose}><X size={18}/></button></div>}
+      {children}
+    </div>
+  </div>;
+}
+
+function Login({ role, onLogin, onBack }) {
+  const [show, setShow] = useState(false);
+  const [email,setEmail]=useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading,setLoading]=useState(false);
+  const submit = async e => {
+    e.preventDefault();
+    setLoading(true);
+    setError('');
+    const {data,error:authError}=await supabase.auth.signInWithPassword({email,password});
+    if(authError){setError(authError.message);setLoading(false);return;}
+    const {data:profile,error:profileError}=await supabase.from('profiles')
+      .select('role,display_name').eq('id',data.user.id).single();
+    if(profileError||profile.role!==role.toLowerCase()){
+      await supabase.auth.signOut();
+      setError(profileError?.message||'Akun tidak memiliki akses ke portal ini.');
+      setLoading(false);
+      return;
+    }
+    onLogin(profile,data.session);
+  };
+  return <div className="login-page">
+    <div className="login-card">
+      <button className="back-link" onClick={onBack}><ArrowLeft size={16}/> Kembali</button>
+      <Logo/>
+      <div className="login-icon">{role === 'ADMIN' ? <Settings/> : role==='BOSS'?<TrendingUp/>:<UserRound/>}</div>
+      <h2>{role === 'ADMIN' ? 'Dashboard Administrasi' : role === 'BOSS' ? 'Dashboard Executive' : 'Portal Operator'}</h2>
+      <p>Masuk untuk melanjutkan</p>
+      <form onSubmit={submit}>
+        <label>Email</label>
+        <div className="password-field"><input type="email" autoComplete="username" required value={email} onChange={e=>{setEmail(e.target.value);setError('')}} placeholder="nama@perusahaan.com"/></div>
+        <label>Password</label>
+        <div className="password-field">
+          <input type={show ? 'text' : 'password'} autoComplete="current-password" required value={password} onChange={e=>{setPassword(e.target.value);setError('')}} placeholder="Masukkan password"/>
+          <button type="button" onClick={()=>setShow(!show)}>{show?<EyeOff size={18}/>:<Eye size={18}/>}</button>
+        </div>
+        {error && <div className="form-error">{error}</div>}
+        <button className="primary-btn full" disabled={loading}>{loading?'Memproses...':'Masuk Dashboard'}</button>
+      </form>
+      <small>Akun dibuat oleh Admin Supabase.</small>
+    </div>
+  </div>;
+}
+
+function PortalSelect({ onSelect }) {
+  return <div className="portal-page">
+    <div className="portal-brand"><Logo/><span>Portal Produksi</span></div>
+    <div className="portal-wrap">
+      <div className="portal-heading">
+        <span className="eyebrow">SISTEM MANAJEMEN OPERASIONAL</span>
+        <h1>Pilih Portal Anda</h1>
+        <p>Akses sesuai dengan peran dan tanggung jawab kerja.</p>
+      </div>
+      <div className="portal-grid">
+        <button className="portal-card" onClick={()=>onSelect('OPERATOR')}>
+          <div className="portal-card-icon operator"><UserRound/></div>
+          <h3>Portal Operator</h3><p>Absensi, laporan produksi, dan peminjaman tools.</p>
+          <span>Masuk sebagai Operator <b>→</b></span>
+        </button>
+        <button className="portal-card" onClick={()=>onSelect('ADMIN')}>
+          <div className="portal-card-icon admin"><Settings/></div>
+          <h3>Administrasi</h3><p>Master data, verifikasi, stok, dan laporan operasional.</p>
+          <span>Masuk sebagai Admin <b>→</b></span>
+        </button>
+        <button className="portal-card" onClick={()=>onSelect('BOSS')}>
+          <div className="portal-card-icon boss"><TrendingUp/></div>
+          <h3>Executive</h3><p>Monitoring performa, produksi, PO, dan efisiensi tools.</p>
+          <span>Masuk sebagai Executive <b>→</b></span>
+        </button>
+      </div>
+    </div>
+  </div>;
+}
+
+function AppShell({ role, profile, onLogout, children }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const navByRole = {
+    OPERATOR: [['dashboard','Beranda'],['production','SPK Produksi'],['attendance','Absensi'],['tools','Tools']],
+    ADMIN: [['dashboard','Ringkasan'],['production','Produksi & SPK'],['attendance','Absensi'],['master','Master Data'],['inventory','Inventori'],['reports','Laporan']],
+    BOSS: [['dashboard','Ringkasan'],['production','Progres PO'],['performance','Performa'],['tools','Efisiensi Tools'],['reports','Laporan']]
+  };
+  const [active, setActive] = useState('dashboard');
+  return <div className="app-shell">
+    <aside className={menuOpen?'open':''}>
+      <div className="side-head"><Logo/><button className="side-close" onClick={()=>setMenuOpen(false)}><X size={20}/></button></div>
+      <nav>{navByRole[role].map(([id,label]) =>
+        <button key={id} className={active===id?'active':''} onClick={()=>{setActive(id);setMenuOpen(false)}}>{iconFor(id)}<span>{label}</span></button>
+      )}</nav>
+      <div className="side-bottom"><button className="logout" onClick={onLogout}><LogOut size={18}/><span>Keluar</span></button></div>
+    </aside>
+    {menuOpen && <div className="side-overlay" onClick={()=>setMenuOpen(false)}/>}
+    <main>
+      <header className="topbar">
+        <button className="menu-btn" onClick={()=>setMenuOpen(true)}><Menu size={22}/></button>
+        <div><span className="top-role">{role}</span><strong>{role==='OPERATOR'?'Portal Operator':role==='ADMIN'?'Dashboard Administrasi':'Executive Dashboard'}</strong></div>
+        <div className="top-actions"><button className="notification"><Bell size={19}/><i/></button><div className="avatar">{role==='OPERATOR'?'OP':role==='ADMIN'?'AD':'EX'}</div></div>
+      </header>
+      <div className="content">{React.cloneElement(children, {active, setActive, profile})}</div>
+    </main>
+  </div>;
+}
+
+function iconFor(id) {
+  const icons={dashboard:<LayoutDashboard size={19}/>,production:<ClipboardList size={19}/>,attendance:<CalendarCheck size={19}/>,tools:<Wrench size={19}/>,master:<Users size={19}/>,inventory:<Package size={19}/>,reports:<Download size={19}/>,performance:<BarChart3 size={19}/>}
+  return icons[id];
+}
+
+function Operator({ active, setActive, profile }) {
+  const [warning,setWarning]=useState(true);
+  const [operator]=useState(profile.display_name);
+  const [modal,setModal]=useState(null);
+  const attendanceApi=useRemoteRecords('attendance_records');
+  const productionApi=useRemoteRecords('production_reports');
+  const today=getLocalDateKey();
+  const attendanceRecord=attendanceApi.records.find(record=>record.operator===operator&&record.date===today);
+  const attended=Boolean(attendanceRecord?.checkIn);
+  const clocked=attended&&!attendanceRecord.checkOut;
+  const hasSubmittedProduction=productionApi.records.some(report=>report.operator===operator&&report.date===today);
+  const clockIn=()=>attendanceApi.rpc('operator_clock_in',{p_shift_date:today});
+  const clockOut=()=>attendanceRecord?.id&&attendanceApi.rpc('operator_clock_out',{p_attendance_id:attendanceRecord.id});
+  const todayLabel=new Date().toLocaleDateString('id-ID',{timeZone:'Asia/Jakarta',day:'numeric',month:'long',year:'numeric'});
+  if(warning) return <Modal title="Peringatan Awal" onClose={()=>setWarning(false)}>
+    <div className="warning-icon"><TriangleAlert size={28}/></div>
+    <p className="warning-text">Harap memasukkan laporan sesuai aktual dengan jujur. Pengajuan izin sakit maksimal H-10 jam sebelum shift, dan pengajuan cuti/libur maksimal H-1 minggu sebelum tanggal libur.</p>
+    <button className="primary-btn full" onClick={()=>setWarning(false)}>Saya Mengerti</button>
+  </Modal>;
+  if(active==='attendance') return <Attendance operator={operator} attendanceRecord={attendanceRecord} attended={attended} clocked={clocked} hasSubmittedProduction={hasSubmittedProduction} onClockIn={clockIn} onClockOut={clockOut} setActive={setActive} error={attendanceApi.error}/>;
+  if(active==='production') return <Production operator={operator} clocked={clocked} setActive={setActive} productionApi={productionApi}/>;
+  if(active==='tools') return <OperatorTools operator={operator} />;
+  return <div>
+    <div className="page-title"><div><span>Hari Ini · {todayLabel}</span><h1>Selamat Bekerja, {operator}</h1></div></div>
+    <SyncError error={attendanceApi.error||productionApi.error}/>
+    <div className="operator-status">
+      <div className="status-card"><div className="status-icon green"><Clock3/></div><div><span>Status Kehadiran</span><strong>{attendanceRecord?.checkOut?'Sudah Absen Pulang':clocked?'Sudah Absen Masuk':'Belum Absen Masuk'}</strong></div></div>
+      <button className="primary-btn" onClick={()=>setActive('attendance')}>{attended?'Kelola Absensi':'Absen Sekarang'} <ChevronDown size={16}/></button>
+    </div>
+    <div className="section-head"><h2>Informasi Kerja</h2></div>
+    <div className="kpi-grid operator-kpi">
+      <div className="kpi-card"><span>Hasil Hari Ini</span><strong>84</strong><small className="positive">+12% dari kemarin</small></div>
+      <div className="kpi-card"><span>Outstanding Item</span><strong>3</strong><small>156 pcs tersisa</small></div>
+      <div className="kpi-card"><span>Efisiensi</span><strong>92%</strong><small className="positive">Irit tools</small></div>
+    </div>
+    <div className="two-col">
+      <div className="panel"><div className="panel-head"><h3>Loading Line</h3><button onClick={()=>setActive('production')}>Lihat Semua</button></div>
+        <LoadingLine item="72559" progress={68} qty="68 / 100 pcs"/>
+        <LoadingLine item="H122-AD1-9810" progress={42} qty="42 / 100 pcs"/>
+        <LoadingLine item="RUMAH KONIS" progress={81} qty="81 / 100 pcs"/>
+      </div>
+      <div className="panel"><div className="panel-head"><h3>Aksi Cepat</h3></div>
+        <div className="quick-actions">
+          <button onClick={()=>setActive('production')}><ClipboardList/><span>Input Produksi</span></button>
+          <button onClick={()=>setActive('tools')}><Wrench/><span>Ambil Tools</span></button>
+          <button onClick={()=>setActive('attendance')}><CalendarCheck/><span>Izin / Cuti</span></button>
+        </div>
+      </div>
+    </div>
+  </div>;
+}
+
+function LoadingLine({item,progress,qty}) {
+  return <div className="loading-row"><div className="loading-name"><strong>{item}</strong><span>{qty}</span></div><div className="progress"><i style={{width:progress+'%'}}/></div><b>{progress}%</b></div>;
+}
+
+function Attendance({operator,attendanceRecord,attended,clocked,hasSubmittedProduction,onClockIn,onClockOut,setActive,error}) {
+  const [modal,setModal]=useState(null);
+  const [leaveKind,setLeaveKind]=useState('Izin Sakit');
+  const todayLabel=new Date().toLocaleDateString('id-ID',{timeZone:'Asia/Jakarta',day:'numeric',month:'long',year:'numeric'});
+  return <div>
+    <div className="page-title"><div><span>Absensi Operator · {todayLabel}</span><h1>Hari Ini</h1></div><strong>{operator}</strong></div>
+    <SyncError error={error}/>
+    <div className="attendance-grid">
+      <div className="attendance-card"><CalendarCheck size={28}/><span>Absen Masuk</span><strong>{attendanceRecord?.checkIn?formatAttendanceTimestamp(attendanceRecord.checkIn):'Belum Absen'}</strong><button className="primary-btn" disabled={attended} onClick={onClockIn}>Absen Masuk</button></div>
+      <div className="attendance-card"><Clock3 size={28}/><span>Absen Pulang</span><strong>{attendanceRecord?.checkOut?formatAttendanceTimestamp(attendanceRecord.checkOut):hasSubmittedProduction?'Siap Absen Pulang':'Selesai input SPK terlebih dahulu'}</strong><button className="outline-btn" disabled={!clocked||!hasSubmittedProduction||Boolean(attendanceRecord?.checkOut)} onClick={onClockOut}>Absen Pulang</button></div>
+    </div>
+    {clocked && <div className="activate-note"><Check size={18}/><div><strong>Menu SPK aktif</strong><span>Anda dapat mulai memasukkan laporan produksi.</span></div><button onClick={()=>setActive('production')}>Buka SPK</button></div>}
+    <div className="panel leave-panel"><div className="panel-head"><h3>Form Izin / Cuti</h3></div>
+      <div className="leave-form">
+        <label>Jenis Pengajuan<select value={leaveKind} onChange={e=>setLeaveKind(e.target.value)}><option>Izin Sakit</option><option>Cuti / Libur</option></select></label>
+        <label>Tanggal<select><option>20 November 2026</option><option>21 November 2026</option></select></label>
+        <label>Keterangan<input placeholder="Tulis keterangan..."/></label>
+        <button className="primary-btn" onClick={()=>setModal('submitted')}>Ajukan Pengajuan</button>
+      </div>
+    </div>
+    {modal&&<Modal title="Pengajuan Terkirim" onClose={()=>setModal(null)}><div className="success-state"><div><Check/></div><h3>Pengajuan {leaveKind} berhasil</h3><p>Status saat ini: Pending verifikasi Admin.</p><button className="primary-btn full" onClick={()=>setModal(null)}>Selesai</button></div></Modal>}
+  </div>;
+}
+
+function Production({operator,clocked,setActive,productionApi}) {
+  const [kind,setKind]=useState('Tunggal');
+  const [modal,setModal]=useState(false);
+  const [machine,setMachine]=useState('VMC 850');
+  const [item,setItem]=useState('72559');
+  const [op,setOp]=useState('OP1');
+  const submit=async e=>{
+    e.preventDefault();
+    const report=await productionApi.rpc('operator_submit_production_report',{
+      p_machine:machine,p_item_name:item,p_op_name:op,p_qty_oke:38,p_qty_repair:1,p_qty_ng:0
+    });
+    if(report)setModal(true);
+  };
+  if(!clocked) return <div><div className="page-title"><div><span>SPK Produksi</span><h1>Menu belum aktif</h1></div></div><div className="empty-state"><Clock3/><h3>Silakan Absen Masuk terlebih dahulu</h3><p>Menu SPK akan aktif setelah presensi masuk tercatat.</p><button className="primary-btn" onClick={()=>setActive('attendance')}>Ke Halaman Absensi</button></div></div>;
+  return <div>
+    <div className="page-title"><div><span>SPK Produksi</span><h1>Input Laporan Pekerjaan</h1></div><button className="outline-btn" onClick={()=>setActive('dashboard')}>Kembali</button></div>
+    <SyncError error={productionApi.error}/>
+    <div className="segmented"><button className={kind==='Tunggal'?'active':''} onClick={()=>setKind('Tunggal')}>Input Tunggal</button><button className={kind==='Gabungan'?'active':''} onClick={()=>setKind('Gabungan')}>Input Gabungan</button></div>
+    <form className="panel production-form" onSubmit={submit}>
+      <div className="form-grid">
+        <label>Nama Operator<input value={operator} disabled/></label>
+        <label>Nama Mesin<select value={machine} onChange={e=>setMachine(e.target.value)}>{MACHINES.map(m=><option key={m}>{m}</option>)}</select></label>
+        <label>Nama Item / Pekerjaan<select value={item} onChange={e=>setItem(e.target.value)}>{ITEMS.map(i=><option key={i}>{i}</option>)}</select></label>
+        <label>Pilihan OP<select value={op} onChange={e=>setOp(e.target.value)}>{['OP1','OP2','OP3','OP4','OP5'].map(o=><option key={o}>{o}</option>)}</select></label>
+        <label>Waktu Setting Awal<input type="time" defaultValue="08:00"/></label>
+        <label>Cycle Time per OP<div className="inline-fields"><input type="number" defaultValue="2" placeholder="Jam"/><input type="number" defaultValue="15" placeholder="Menit"/></div></label>
+        <label>Lama Loading / Unloading<div className="inline-fields"><input type="number" defaultValue="10" placeholder="Menit"/></div></label>
+      </div>
+      {kind==='Gabungan'&&<label className="wide-label">Pilih mesin tambahan<div className="check-row">{MACHINES.slice(1,4).map(m=><label key={m}><input type="checkbox"/>{m}</label>)}</div></label>}
+      <h3>Hasil Produksi</h3>
+      <div className="result-grid"><label className="oke"><span>OKE</span><input type="number" defaultValue="38"/></label><label className="repair"><span>Repair</span><input type="number" defaultValue="1"/></label><label className="ng"><span>NG</span><input type="number" defaultValue="0"/></label></div>
+      <button className="primary-btn submit-report">Simpan &amp; Kirim Laporan</button>
+    </form>
+    {modal&&<Modal title="Laporan Terkirim" onClose={()=>setModal(false)}><div className="success-state"><div><Check/></div><h3>Hasil produksi berhasil disimpan</h3><p>Menunggu verifikasi Admin.</p><button className="primary-btn full" onClick={()=>setModal(false)}>Selesai</button></div></Modal>}
+  </div>;
+}
+
+function OperatorTools({operator}) {
+  const [tab,setTab]=useState('Ambil');
+  const [machine,setMachine]=useState('VMC 850');
+  const [tool,setTool]=useState('Milling');
+  const [size,setSize]=useState('10');
+  const code=`MIL${size}-${operator.slice(0,3).toUpperCase()}-${machine.match(/\d+/)?.[0]||850}-0815`;
+  const [toast,setToast]=useState('');
+  return <div><div className="page-title"><div><span>Manajemen Tools</span><h1>Pengambilan &amp; Pengembalian</h1></div></div>
+    <div className="segmented"><button className={tab==='Ambil'?'active':''} onClick={()=>setTab('Ambil')}>Ambil Tools</button><button className={tab==='Kembali'?'active':''} onClick={()=>setTab('Kembali')}>Pengembalian</button><button className={tab==='Serah'?'active':''} onClick={()=>setTab('Serah')}>Serah Terima Shift</button></div>
+    {tab==='Ambil'&&<div className="panel tool-form"><div className="form-grid"><label>Nama Tools<select value={tool} onChange={e=>setTool(e.target.value)}><option>Milling</option><option>Endmill</option><option>Kikir</option><option>Mata Gurinda</option></select></label><label>Ukuran<input value={size} onChange={e=>setSize(e.target.value)}/></label><label>Mesin Digunakan<select value={machine} onChange={e=>setMachine(e.target.value)}>{MACHINES.map(m=><option key={m}>{m}</option>)}</select></label><label>Jumlah (Qty)<input type="number" defaultValue="1"/></label><label>Status Barang<select><option>Baru</option><option>Bekas</option></select></label></div><div className="tool-code"><span>Kode Unik</span><strong>{code}</strong></div><button className="primary-btn" onClick={()=>setToast('Pengambilan tools berhasil dicatat')}>Ambil Tools</button></div>}
+    {tab==='Kembali'&&<div className="panel tool-form"><label>Masukkan / Scan Kode Unik<input placeholder="Contoh: MIL10-AMR-850-0815"/></label><div className="condition-grid">{['Tumpul','Patah','Masih Layak / Bekas'].map(c=><button key={c} onClick={()=>setToast(`Pengembalian dikonfirmasi: ${c}`)}>{c}</button>)}</div></div>}
+    {tab==='Serah'&&<div className="panel tool-form"><div className="form-grid"><label>Operator Penerima<select>{OPERATORS.map(o=><option key={o}>{o}</option>)}</select></label><label>Shift Tujuan<select><option>Shift 2</option><option>Shift 1</option></select></label><label>Tools yang Diserahkan<input defaultValue="Milling 10 - 1 pcs"/></label><label>Catatan Hasil Kerja<input defaultValue="Hasil sesuai SPK"/></label></div><div className="tool-code"><span>Kode Serah Terima Baru</span><strong>HD-10-AMR-S2-0830</strong></div><button className="primary-btn" onClick={()=>setToast('Serah terima shift berhasil dicatat')}>Konfirmasi Serah Terima</button></div>}
+    {toast&&<div className="toast"><Check size={17}/>{toast}<button onClick={()=>setToast('')}><X size={14}/></button></div>}
+  </div>;
+}
+
+function Admin({active}) {
+  if(active==='master') return <AdminMaster/>;
+  if(active==='inventory') return <AdminInventory/>;
+  if(active==='attendance') return <AdminAttendance/>;
+  if(active==='reports') return <AdminReports/>;
+  if(active==='production') return <AdminProduction/>;
+  return <AdminDashboard setActive={()=>{}}/>;
+}
+
+function StatCards() {
+  return   <div className="kpi-grid"><div className="kpi-card"><span>Produksi Hari Ini</span><strong>1.284</strong><small className="positive">↑ 8.4% dari kemarin</small></div><div className="kpi-card"><span>Outstanding PO</span><strong>3.450</strong><small>12 pekerjaan aktif</small></div><div className="kpi-card"><span>Efisiensi Tools</span><strong>94%</strong><small className="positive">Irit &amp; Seimbang</small></div><div className="kpi-card"><span>Menunggu Verifikasi</span><strong>18</strong><small className="warning-text-small">Perlu tindakan</small></div></div>;
+}
+
+function AdminDashboard({setActive}) {
+  return <div><div className="page-title"><div><span>19 November 2026 · Shift 1</span><h1>Ringkasan Operasional</h1></div><button className="outline-btn" onClick={()=>downloadExcel('ringkasan-operasional','Ringkasan',[['Indikator','Nilai'],['Produksi Hari Ini',1284],['Outstanding PO',3450],['Efisiensi Tools','94%'],['Menunggu Verifikasi',18]])}><Download size={16}/> Ekspor Excel</button></div><StatCards/><div className="two-col admin-overview"><div className="panel"><div className="panel-head"><h3>Loading Line Mesin</h3><span className="live-dot">LIVE</span></div>{['VMC 850','VMC 650','HYUNDAI','KASUGA'].map((m,i)=><LoadingLine key={m} item={m} progress={[72,48,86,35][i]} qty={[216,128,172,84][i]+' pcs'}/>)}</div><div className="panel"><div className="panel-head"><h3>Verifikasi Produksi</h3><b>18 pending</b></div><LiveTable compact/></div></div></div>;
+}
+
+function VerificationActions({status,onChange,approveLabel='Verifikasi',rejectLabel='Tidak disetujui'}) {
+  if(status!=='Pending') return <span className={'status-badge '+(status==='Terverifikasi'?'verified':'rejected')}>{status}</span>;
+  return <div className="verify-actions">
+    <button className="verify-approve" onClick={onChange('Terverifikasi')}>{approveLabel}</button>
+    <button className="verify-reject" onClick={onChange('Tidak disetujui')}>{rejectLabel}</button>
+  </div>;
+}
+
+function LiveTableView({records,error,setVerificationStatus}) {
+  const updateStatus=id=>status=>()=>setVerificationStatus(id,status);
+  return <div className="table-wrap"><table>
+    <thead><tr><th>SPK</th><th>Operator</th><th>Mesin</th><th>Item</th><th>OP</th><th>OKE</th><th>Verifikasi Pekerjaan</th></tr></thead>
+    <tbody>{records.map(report=><tr key={report.id}>
+      <td>{report.code}</td><td>{report.operator}</td><td>{report.machine}</td><td>{report.item}</td><td>{report.op}</td><td>{report.oke}</td>
+      <td><VerificationActions status={report.status} onChange={updateStatus(report.id)}/></td>
+    </tr>)}</tbody>
+    {error&&<tfoot><tr><td colSpan="7"><SyncError error={error}/></td></tr></tfoot>}
+  </table></div>;
+}
+
+function LiveTable() {
+  const api=useRemoteRecords('production_reports');
+  return <LiveTableView {...api}/>;
+}
+
+function AdminProduction() {
+  const api=useRemoteRecords('production_reports');
+  const exportRows=[
+    ['SPK','Operator','Tanggal','Mesin','Item','OP','OKE','Repair','NG','Status Verifikasi'],
+    ...api.records.map(report=>[report.code,report.operator,report.date,report.machine,report.item,report.op,report.oke,report.repair,report.ng,report.status])
+  ];
+  return <div><div className="page-title"><div><span>Verifikasi &amp; Live Table</span><h1>Produksi &amp; SPK</h1></div><div className="report-actions"><button className="outline-btn" onClick={()=>downloadCsv('laporan-hasil-produksi',exportRows)}><Download size={16}/> CSV</button><button className="primary-btn" onClick={()=>downloadExcel('laporan-hasil-produksi','Produksi',exportRows)}><Download size={16}/> Excel</button></div></div><StatCards/><SyncError error={api.error}/><div className="panel"><div className="panel-head"><h3>Live Table Hasil Produksi</h3><div className="search"><Search size={16}/><input placeholder="Cari SPK / operator"/></div></div><LiveTableView {...api}/></div></div>;
+}
+
+function AdminMaster() {
+  const [tab,setTab]=useState('Customer & PO');
+  const [modal,setModal]=useState(false);
+  const rows = tab==='Customer & PO'
+    ? [['PT. HILEX','PO-HLX-2511','4.500 pcs'],['PT. Pindad','PO-PND-2518','2.800 pcs'],['PT. Astra Otoparts','PO-AST-2204','3.200 pcs']]
+    : tab==='Item'
+      ? [['72559','2 menit','500 pcs'],['H122-AD1-9810','3 menit','350 pcs'],['RUMAH KONIS','4 menit','200 pcs']]
+      : tab==='Mesin'
+        ? [['VMC 850','Aktif','AMRI, ERWIN'],['VMC 650','Aktif','M. RIPAI'],['HYUNDAI','Maintenance','AGUS']]
+        : [['Aluminium Batang','SJ-AL-1024','120 batang'],['Besi S45C','SJ-BS-1088','80 batang']];
+  return <div>
+    <div className="page-title"><div><span>Konfigurasi Sistem</span><h1>Master Data</h1></div><button className="primary-btn" onClick={()=>setModal(true)}><Plus size={16}/> Tambah Data</button></div>
+    <div className="segmented">{['Customer & PO','Item','Mesin','Material'].map(t=><button className={tab===t?'active':''} key={t} onClick={()=>setTab(t)}>{t}</button>)}</div>
+    <div className="panel"><div className="table-wrap"><table>
+      <thead><tr><th>{tab==='Item'?'Nama Item':tab==='Mesin'?'Nama Mesin':tab==='Material'?'Nama Barang':'Customer'}</th><th>{tab==='Customer & PO'?'Nomor PO':tab==='Item'?'Cycle Time':tab==='Mesin'?'Status':'Nomor Surat Jalan'}</th><th>{tab==='Customer & PO'?'Target':tab==='Item'?'Target Harian':tab==='Mesin'?'Operator':'Jumlah Masuk'}</th><th>Aksi</th></tr></thead>
+      <tbody>{rows.map((r,i)=><tr key={i}>{r.map((c,j)=><td key={j}>{j===1&&tab==='Mesin'?<span className={'status-badge '+(c==='Aktif'?'verified':'pending')}>{c}</span>:c}</td>)}<td><button className="text-btn">Edit</button></td></tr>)}</tbody>
+    </table></div></div>
+    {modal&&<Modal title={'Tambah '+tab} onClose={()=>setModal(false)}><div className="form-grid"><label>Nama<input placeholder="Masukkan nama"/></label><label>Keterangan<input placeholder="Masukkan keterangan"/></label></div><button className="primary-btn full" onClick={()=>setModal(false)}>Simpan Data</button></Modal>}
+  </div>;
+}
+
+function AdminInventory() {
+  return <div><div className="page-title"><div><span>Stok & Tracking</span><h1>Inventori Tools</h1></div><button className="primary-btn"><Plus size={16}/> Barang Masuk</button></div><div className="kpi-grid"><div className="kpi-card"><span>Tools Baru</span><strong>248</strong></div><div className="kpi-card"><span>Tools Re-usable</span><strong>96</strong></div><div className="kpi-card"><span>Afkir / Rusak</span><strong>12</strong></div><div className="kpi-card"><span>Tools Aktif Dipakai</span><strong>34</strong></div></div><div className="panel"><div className="panel-head"><h3>Stok Inventori</h3><div className="search"><Search size={16}/><input placeholder="Cari tools"/></div></div><div className="table-wrap"><table><thead><tr><th>Nama Tools</th><th>Stok Baru</th><th>Bekas Re-usable</th><th>Afkir / Rusak</th><th>Batas Minimal</th><th>Status</th></tr></thead><tbody>{[['Milling 10','42','18','4','15'],['Endmill 12','28','12','2','10'],['Mata Gurinda','86','0','8','30'],['Kikir 8','35','9','1','12']].map((r,i)=><tr key={i}>{r.map((c,j)=><td key={j}>{j===5?<span className="status-badge verified">Cukup</span>:c}</td>)}</tr>)}</tbody></table></div></div></div>;
+}
+
+function AdminAttendance() {
+  const attendanceApi=useRemoteRecords('attendance_records');
+  const attendanceRecords=attendanceApi.records;
+  const today=getLocalDateKey();
+  const todayLabel=new Date().toLocaleDateString('id-ID',{timeZone:'Asia/Jakarta',day:'numeric',month:'long',year:'numeric'});
+  const presentRecords=attendanceRecords.filter(record=>record.date===today&&record.checkIn);
+  const pendingCount=presentRecords.filter(record=>record.status==='Pending').length;
+  const updateStatus=id=>status=>()=>attendanceApi.setVerificationStatus(id,status);
+  return <div>
+    <div className="page-title">
+      <div><span>Absensi Operator · {todayLabel}</span><h1>Absensi &amp; Lembur</h1></div>
+      <button className="outline-btn"><Download size={16}/> Sinkron Ulang</button>
+    </div>
+    <SyncError error={attendanceApi.error}/>
+    <div className="kpi-grid">
+      <div className="kpi-card"><span>Hadir Hari Ini</span><strong>{presentRecords.length} / {OPERATORS.length}</strong></div>
+      <div className="kpi-card"><span>Izin / Cuti</span><strong>2</strong></div>
+      <div className="kpi-card"><span>Jam Lembur</span><strong>38 jam</strong></div>
+      <div className="kpi-card"><span>Pending Verifikasi</span><strong>{pendingCount}</strong></div>
+    </div>
+    <div className="panel">
+      <div className="panel-head"><h3>Rekap Kehadiran Operator</h3><select><option>Minggu Ini</option></select></div>
+      <div className="table-wrap"><table>
+        <thead><tr><th>Nama</th><th>Tanggal</th><th>Absen Masuk (WIB)</th><th>Absen Pulang (WIB)</th><th>Status / Aksi</th></tr></thead>
+        <tbody>{OPERATORS.map(operator=>{
+          const record=attendanceRecords.find(item=>item.operator===operator&&item.date===today);
+          const status=record?.checkIn?record.status:'Belum Absen';
+          return <tr key={operator}>
+            <td><strong>{operator}</strong></td><td>{record?.date||'—'}</td>
+            <td>{formatAttendanceTimestamp(record?.checkIn)}</td><td>{formatAttendanceTimestamp(record?.checkOut)}</td>
+            <td>{record?.checkIn
+              ? <VerificationActions status={status} onChange={updateStatus(record.id)} approveLabel="Setuju" rejectLabel="Tidak"/>
+              : <span className="status-badge neutral">Belum Absen</span>}
+            </td>
+          </tr>;
+        })}</tbody>
+      </table></div>
+    </div>
+  </div>;
+}
+
+function AdminReports() {
+  const [productionPeriod,setProductionPeriod]=useState('2026-11');
+  const [attendancePeriod,setAttendancePeriod]=useState('2026-11');
+  const [payrollPeriod,setPayrollPeriod]=useState('2026-W47');
+  const [payrollTimestamp,setPayrollTimestamp]=useState('');
+  const [operator,setOperator]=useState(OPERATORS[0]);
+  const productionApi=useRemoteRecords('production_reports');
+  const attendanceApi=useRemoteRecords('attendance_records');
+  const attendanceRecords=attendanceApi.records;
+  const productionRows=[
+    ['SPK','Operator','Tanggal','Mesin','Item','OP','OKE','Repair','NG','Status Verifikasi'],
+    ...productionApi.records.filter(record=>record.date.startsWith(productionPeriod)).map(report=>[
+      report.code,report.operator,report.date,report.machine,report.item,report.op,report.oke,report.repair,report.ng,report.status
+    ])
+  ];
+  const periodAttendance=attendanceRecords.filter(record=>record.date.startsWith(attendancePeriod));
+  const attendanceRows=[
+    ['Operator','Tanggal','Absen Masuk (WIB)','Absen Pulang (WIB)','Status Verifikasi'],
+    ...periodAttendance.map(record=>[
+      record.operator,record.date,formatAttendanceTimestamp(record.checkIn),formatAttendanceTimestamp(record.checkOut),
+      record.status||'Pending'
+    ])
+  ];
+  const weekDates=getWeekDates(payrollPeriod);
+  const weeklyAttendance=attendanceRecords.filter(record=>record.operator===operator&&record.date>=weekDates.start&&record.date<=weekDates.end);
+  const downloadPayrollSlip=()=>{
+    const timestamp=new Date().toLocaleString('id-ID',{timeZone:'Asia/Jakarta',dateStyle:'full',timeStyle:'medium'});
+    setPayrollTimestamp(timestamp);
+    downloadExcel(`slip-gaji-${operator.toLowerCase().replaceAll(' ','-')}-${payrollPeriod}`,'Slip Gaji',[
+      ['Slip Gaji - Rekap Mingguan'],
+      ['Periode',payrollPeriod],
+      ['Tanggal Mulai',weekDates.start],
+      ['Tanggal Selesai',weekDates.end],
+      ['Dicetak pada (WIB)',timestamp],
+      ['Operator',operator],
+      ['Total Hari Hadir',weeklyAttendance.filter(record=>record.checkIn).length],
+      ['Tanggal','Absen Masuk (WIB)','Absen Pulang (WIB)','Status Verifikasi'],
+      ...(weeklyAttendance.length
+        ? weeklyAttendance.map(record=>[
+          record.date,formatAttendanceTimestamp(record.checkIn),formatAttendanceTimestamp(record.checkOut),
+          record.status||'Pending'
+        ])
+        : [['—','Belum ada catatan absensi pada minggu ini','—','—']]),
+      ['Jam Lembur','Belum ada data pencatatan lembur.'],
+      ['Catatan Gaji','Nominal gaji belum dihitung karena tarif gaji belum dikonfigurasi.']
+    ]);
+  };
+  return <div>
+    <div className="page-title"><div><span>Ekspor &amp; Analisis</span><h1>Laporan</h1></div></div>
+    <SyncError error={productionApi.error||attendanceApi.error}/>
+    <div className="report-grid">
+      <div className="panel"><h3>Laporan Produksi</h3><p>Laporan hasil SPK aktual per item dan mesin.</p>
+        <label>Periode<input type="month" value={productionPeriod} onChange={event=>setProductionPeriod(event.target.value)}/></label>
+        <div className="report-actions">
+          <button className="outline-btn" onClick={()=>downloadCsv(`laporan-produksi-${productionPeriod}`,productionRows)}><Download size={16}/> CSV</button>
+          <button className="primary-btn" onClick={()=>downloadExcel(`laporan-produksi-${productionPeriod}`,'Produksi',productionRows)}><Download size={16}/> Excel</button>
+        </div>
+      </div>
+      <div className="panel"><h3>Laporan Absensi</h3><p>Rekap mingguan dan bulanan.</p>
+        <label>Periode<input type="month" value={attendancePeriod} onChange={event=>setAttendancePeriod(event.target.value)}/></label>
+        <div className="report-actions">
+          <button className="outline-btn" onClick={()=>downloadCsv(`laporan-absensi-${attendancePeriod}`,attendanceRows)}><Download size={16}/> CSV</button>
+          <button className="primary-btn" onClick={()=>downloadExcel(`laporan-absensi-${attendancePeriod}`,'Absensi',attendanceRows)}><Download size={16}/> Excel</button>
+        </div>
+      </div>
+      <div className="panel"><h3>Slip Gaji</h3><p>Rekap kehadiran dan lembur operator.</p>
+        <label>Periode Mingguan<input type="week" value={payrollPeriod} onChange={event=>setPayrollPeriod(event.target.value)}/></label>
+        {weekDates.start&&<p className="period-caption">{weekDates.start} s/d {weekDates.end}</p>}
+        <label>Pilih Operator<select value={operator} onChange={event=>setOperator(event.target.value)}>{OPERATORS.map(name=><option key={name}>{name}</option>)}</select></label>
+        <div className="report-actions"><button className="primary-btn" onClick={downloadPayrollSlip}><Download size={16}/> Unduh Slip Excel</button></div>
+        {payrollTimestamp&&<p className="period-caption">Terakhir dibuat: {payrollTimestamp} WIB</p>}
+      </div>
+    </div>
+  </div>;
+}
+
+function Boss({active}) {
+  if(active==='production') return <BossProduction/>;
+  if(active==='performance') return <BossPerformance/>;
+  if(active==='tools') return <BossTools/>;
+  if(active==='reports') return <AdminReports/>;
+  return <div><div className="page-title"><div><span>19 November 2026 · Real-Time</span><h1>Executive Overview</h1></div><button className="outline-btn" onClick={()=>downloadExcel('ringkasan-eksekutif','Ringkasan', [['Indikator','Nilai'],['Progress Produksi','78%'],['Barang Terkirim',8420],['Efisiensi Operator','91%'],['PO Aktif',12]])}><Download size={16}/> Unduh Ringkasan Excel</button></div><div className="kpi-grid"><div className="kpi-card"><span>Progress Produksi</span><strong>78%</strong><small className="positive">↑ 6% target bulan ini</small></div><div className="kpi-card"><span>Barang Terkirim</span><strong>8.420</strong><small>PCS bulan ini</small></div><div className="kpi-card"><span>Efisiensi Operator</span><strong>91%</strong><small className="positive">Di atas target</small></div><div className="kpi-card"><span>PO Aktif</span><strong>12</strong><small>3 mendekati deadline</small></div></div><div className="two-col admin-overview"><div className="panel"><div className="panel-head"><h3>Progres PO Utama</h3><button>Lihat Semua</button></div>{[['PO-HLX-2511','72559','68%'],['PO-PND-2518','H122-AD1-9810','42%'],['PO-AST-2204','RUMAH KONIS','81%']].map(r=><LoadingLine key={r[0]} item={r[0]+` · ${r[1]}`} progress={parseInt(r[2])} qty={r[2]+'/100 pcs'}/>)}</div><div className="panel"><div className="panel-head"><h3>Performa Operator</h3></div><div className="bars">{[['AMRI',92],['M. RIPAI',78],['ERWIN',86],['AGUS',73],['SIGIT',68],['HAFIDZ',81]].map(([n,v])=><div className="bar-row" key={n}><span>{n}</span><div><i style={{height:v+'%'}}/></div><b>{v}%</b></div>)}</div></div></div></div>;
+}
+
+function BossProduction() {
+  const productionApi=useRemoteRecords('production_reports');
+  const rows=[
+    ['PO-HLX-2511','PT. HILEX','72559','4.500','68%','3.060','Terverifikasi','22 Nov'],
+    ['PO-PND-2518','PT. Pindad','H122-AD1-9810','2.800','42%','1.176','Sebagian','24 Nov'],
+    ['PO-AST-2204','PT. Astra Otoparts','RUMAH KONIS','3.200','81%','2.592','Terverifikasi','20 Nov']
+  ];
+  const exportRows=[['Nomor PO','Customer','Item','Target','Progres','Terkirim','Status Verifikasi','Estimasi Finish'],...rows];
+  const productionRows=[
+    ['SPK','Operator','Mesin','Item','OP','OKE','Repair','NG','Waktu Input','Verifikasi'],
+    ...productionApi.records.map(report=>[
+      report.code,report.operator,report.machine,report.item,report.op,report.oke,report.repair,report.ng,report.time,report.status
+    ])
+  ];
+  return <div><div className="page-title"><div><span>Monitoring PO Real-Time</span><h1>Progres Produksi</h1></div><div className="report-actions"><button className="outline-btn" onClick={()=>downloadCsv('progres-po',exportRows)}><Download size={16}/> PO CSV</button><button className="primary-btn" onClick={()=>downloadExcel('progres-po','Progres PO',exportRows)}><Download size={16}/> PO Excel</button></div></div><SyncError error={productionApi.error}/><div className="panel"><div className="panel-head"><h3>Daftar PO Aktif</h3><span className="live-dot">LIVE</span></div><div className="table-wrap"><table><thead><tr><th>PO / Customer</th><th>Item</th><th>Target</th><th>Progres</th><th>Terkirim</th><th>Status Verifikasi</th><th>Estimasi Finish</th></tr></thead><tbody>{rows.map((r,i)=><tr key={i}><td><strong>{r[0]}</strong><small>{r[1]}</small></td><td>{r[2]}</td><td>{r[3]}</td><td><div className="table-progress"><i style={{width:r[4]}}/><span>{r[4]}</span></div></td><td>{r[5]} pcs</td><td><span className={'status-badge '+(r[6]==='Terverifikasi'?'verified':'pending')}>{r[6]}</span></td><td>{r[7]} Nov</td></tr>)}</tbody></table></div></div><div className="panel live-report-panel"><div className="panel-head"><h3>Hasil Produksi Operator</h3><div className="report-actions"><button className="outline-btn" onClick={()=>downloadCsv('hasil-produksi-operator',productionRows)}><Download size={16}/> CSV</button><button className="primary-btn" onClick={()=>downloadExcel('hasil-produksi-operator','Produksi',productionRows)}><Download size={16}/> Excel</button></div></div><div className="table-wrap"><table><thead><tr>{productionRows[0].map(header=><th key={header}>{header}</th>)}</tr></thead><tbody>{productionApi.records.map(report=><tr key={report.id}><td>{report.code}</td><td>{report.operator}</td><td>{report.machine}</td><td>{report.item}</td><td>{report.op}</td><td>{report.oke}</td><td>{report.repair}</td><td>{report.ng}</td><td>{report.time}</td><td><span className={'status-badge '+(report.status==='Terverifikasi'?'verified':report.status==='Pending'?'pending':'rejected')}>{report.status}</span></td></tr>)}</tbody></table></div></div></div>;
+}
+
+function BossPerformance() {
+  const rows=[['AMRI','284','4','8','2','12 menit','94%','↑'],['M. RIPAI','242','5','7','1','16 menit','89%','↓'],['ERWIN','238','3','6','2','14 menit','91%','↑'],['AGUS','210','2','9','1','21 menit','84%','—'],['SIGIT','186','3','7','1','24 menit','81%','↓'],['HAFIDZ','124','1','5','1','18 menit','87%','↑']];
+  const exportRows=[['Operator','OKE','Repair','NG','Mesin Aktif','Setting Rata-rata','Efisiensi','Tren'],...rows];
+  return <div><div className="page-title"><div><span>Kinerja &amp; Produktivitas</span><h1>Performa Operator</h1></div><div className="report-actions"><button className="outline-btn" onClick={()=>downloadCsv('performa-operator',exportRows)}><Download size={16}/> CSV</button><button className="primary-btn" onClick={()=>downloadExcel('performa-operator','Performa',exportRows)}><Download size={16}/> Excel</button></div></div><div className="kpi-grid"><div className="kpi-card"><span>Target Harian Tercapai</span><strong>82%</strong></div><div className="kpi-card"><span>Rata-rata Setting</span><strong>18 menit</strong></div><div className="kpi-card"><span>Total OKE</span><strong>1.284</strong></div><div className="kpi-card"><span>Total NG / Repair</span><strong>42 / 18</strong></div></div><div className="panel"><div className="table-wrap"><table><thead><tr><th>Operator</th><th>OKE</th><th>Repair</th><th>NG</th><th>Mesin Aktif</th><th>Setting Rata-rata</th><th>Efisiensi</th><th>Tren</th></tr></thead><tbody>{rows.map(r=><tr key={r[0]}>{r.map((c,j)=><td key={j}>{j===6?<span className="status-badge verified">{c}</span>:c}</td>)}</tr>)}</tbody></table></div></div></div>;
+}
+
+function BossTools() {
+  const rows=[['AMRI','24','22','28','Irit','2 pcs'],['M. RIPAI','31','29','30','Seimbang','2 pcs'],['ERWIN','26','24','28','Irit','2 pcs'],['AGUS','38','31','32','Boros','7 pcs'],['SIGIT','29','27','30','Seimbang','2 pcs'],['HAFIDZ','20','18','24','Irit','2 pcs']];
+  const exportRows=[['Operator','Tools Dipakai','Tools Dikembalikan','Standar / OP','Indikator','Tools Aktif'],...rows];
+  return <div><div className="page-title"><div><span>Audit Pemakaian</span><h1>Efisiensi Tools</h1></div><div className="report-actions"><button className="outline-btn" onClick={()=>downloadCsv('efisiensi-tools',exportRows)}><Download size={16}/> CSV</button><button className="primary-btn" onClick={()=>downloadExcel('efisiensi-tools','Tools',exportRows)}><Download size={16}/> Excel</button></div></div><div className="kpi-grid"><div className="kpi-card"><span>Kategori Irit</span><strong>3 Operator</strong></div><div className="kpi-card"><span>Seimbang</span><strong>2 Operator</strong></div><div className="kpi-card"><span>Boros</span><strong>1 Operator</strong></div><div className="kpi-card"><span>Tools Aktif</span><strong>34 pcs</strong></div></div><div className="panel"><div className="table-wrap"><table><thead><tr><th>Operator</th><th>Tools Dipakai</th><th>Tools Dikembalikan</th><th>Standar / OP</th><th>Indikator</th><th>Tools Aktif</th></tr></thead><tbody>{rows.map(r=><tr key={r[0]}>{r.map((c,j)=><td key={j}>{j===4?<span className={'tool-indicator '+c.toLowerCase()}>{c}</span>:c}</td>)}</tr>)}</tbody></table></div></div></div>;
+}
+
+function CloudSetup() {
+  return <div className="login-page"><div className="login-card">
+    <Logo/><div className="login-icon"><TriangleAlert/></div>
+    <h2>Backend belum dikonfigurasi</h2>
+    <p>Aplikasi tidak menggunakan penyimpanan lokal. Hubungkan proyek Supabase untuk masuk dan menyimpan data bersama.</p>
+    <div className="setup-instructions"><strong>Atur environment variables:</strong><code>VITE_SUPABASE_URL</code><code>VITE_SUPABASE_ANON_KEY</code><span>Isi di .env.local untuk pengembangan atau Environment Variables Vercel untuk publikasi.</span></div>
+  </div></div>;
+}
+
+function App() {
+  const [portal,setPortal]=useState(null);
+  const [auth,setAuth]=useState({loading:true,session:null,profile:null,error:''});
+  useEffect(()=>{
+    if(!supabase){setAuth({loading:false,session:null,profile:null,error:''});return;}
+    let active=true;
+    const loadProfile=async session=>{
+      if(!session){if(active)setAuth({loading:false,session:null,profile:null,error:''});return;}
+      const {data:profile,error}=await supabase.from('profiles').select('role,display_name').eq('id',session.user.id).single();
+      if(active)setAuth({loading:false,session,profile:profile||null,error:error?.message||''});
+    };
+    supabase.auth.getSession().then(({data,error})=>{
+      if(error){if(active)setAuth({loading:false,session:null,profile:null,error:error.message});return;}
+      loadProfile(data.session);
+    });
+    const {data:{subscription}}=supabase.auth.onAuthStateChange((_event,session)=>{
+      if(!session){if(active)setAuth({loading:false,session:null,profile:null,error:''});return;}
+      setTimeout(()=>loadProfile(session),0);
+    });
+    return ()=>{active=false;subscription.unsubscribe();};
+  },[]);
+  if(!supabase)return <CloudSetup/>;
+  if(auth.loading)return <div className="login-page"><div className="login-card">Menghubungkan ke Supabase...</div></div>;
+  if(auth.session&&!auth.profile)return <div className="login-page"><div className="login-card">
+    <Logo/><div className="login-icon"><TriangleAlert/></div><h2>Profil akses belum tersedia</h2>
+    <p>{auth.error||'Akun Supabase ini belum memiliki profil portal.'}</p>
+    <button className="outline-btn" onClick={()=>supabase.auth.signOut()}>Keluar</button>
+  </div></div>;
+  if(auth.session&&auth.profile){
+    const role=auth.profile.role.toUpperCase();
+    const logout=async()=>{
+      const {error}=await supabase.auth.signOut();
+      if(error)setAuth(current=>({...current,error:error.message}));
+      else setPortal(null);
+    };
+    return <AppShell role={role} profile={auth.profile} onLogout={logout}>
+      {role==='OPERATOR'?<Operator/>:role==='ADMIN'?<Admin/>:<Boss/>}
+    </AppShell>;
+  }
+  if(!portal)return <PortalSelect onSelect={setPortal}/>;
+  return <Login role={portal} onLogin={(profile,session)=>setAuth({loading:false,session,profile,error:''})} onBack={()=>setPortal(null)}/>;
+}
+
+createRoot(document.getElementById('root')).render(<App/>);
