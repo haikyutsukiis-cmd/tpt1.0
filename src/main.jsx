@@ -482,28 +482,134 @@ function AdminProduction() {
 }
 
 function AdminMaster() {
-  const [tab,setTab]=useState('Customer & PO');
+  const [records,setRecords]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [error,setError]=useState('');
+  const [saving,setSaving]=useState(false);
   const [modal,setModal]=useState(false);
-  const rows = tab==='Customer & PO'
-    ? [['PT. HILEX','PO-HLX-2511','4.500 pcs'],['PT. Pindad','PO-PND-2518','2.800 pcs'],['PT. Astra Otoparts','PO-AST-2204','3.200 pcs']]
-    : tab==='Item'
-      ? [['72559','2 menit','500 pcs'],['H122-AD1-9810','3 menit','350 pcs'],['RUMAH KONIS','4 menit','200 pcs']]
-      : tab==='Mesin'
-        ? [['VMC 850','Aktif','AMRI, ERWIN'],['VMC 650','Aktif','M. RIPAI'],['HYUNDAI','Maintenance','AGUS']]
-        : [['Aluminium Batang','SJ-AL-1024','120 batang'],['Besi S45C','SJ-BS-1088','80 batang']];
+  const [editingId,setEditingId]=useState(null);
+  const [form,setForm]=useState({customerName:'',itemName:'',quantity:'',poNumber:''});
+  const refresh=useCallback(async()=>{
+    const {data,error:queryError}=await supabase.from('master_data')
+      .select('id,customer_name,item_name,quantity,po_number').order('created_at',{ascending:false});
+    if(queryError){setError(queryError.message);setLoading(false);return;}
+    setError('');
+    setRecords(data);
+    setLoading(false);
+  },[]);
+  useEffect(()=>{refresh();},[refresh]);
+  const closeModal=()=>{
+    setModal(false);
+    setEditingId(null);
+    setForm({customerName:'',itemName:'',quantity:'',poNumber:''});
+  };
+  const openEdit=record=>{
+    setEditingId(record.id);
+    setForm({
+      customerName:record.customer_name,
+      itemName:record.item_name,
+      quantity:String(record.quantity),
+      poNumber:record.po_number||''
+    });
+    setModal(true);
+  };
+  const saveRecord=async event=>{
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    const values={
+      customer_name:form.customerName.trim(),
+      item_name:form.itemName.trim(),
+      quantity:Number(form.quantity),
+      po_number:form.poNumber.trim()||null
+    };
+    const result=editingId
+      ? await supabase.from('master_data').update(values).eq('id',editingId).select('id').single()
+      : await supabase.from('master_data').insert(values);
+    if(result.error){setError(result.error.message);setSaving(false);return;}
+    await refresh();
+    setSaving(false);
+    closeModal();
+  };
   return <div>
     <div className="page-title"><div><span>Konfigurasi Sistem</span><h1>Master Data</h1></div><button className="primary-btn" onClick={()=>setModal(true)}><Plus size={16}/> Tambah Data</button></div>
-    <div className="segmented">{['Customer & PO','Item','Mesin','Material'].map(t=><button className={tab===t?'active':''} key={t} onClick={()=>setTab(t)}>{t}</button>)}</div>
-    <div className="panel"><div className="table-wrap"><table>
-      <thead><tr><th>{tab==='Item'?'Nama Item':tab==='Mesin'?'Nama Mesin':tab==='Material'?'Nama Barang':'Customer'}</th><th>{tab==='Customer & PO'?'Nomor PO':tab==='Item'?'Cycle Time':tab==='Mesin'?'Status':'Nomor Surat Jalan'}</th><th>{tab==='Customer & PO'?'Target':tab==='Item'?'Target Harian':tab==='Mesin'?'Operator':'Jumlah Masuk'}</th><th>Aksi</th></tr></thead>
-      <tbody>{rows.map((r,i)=><tr key={i}>{r.map((c,j)=><td key={j}>{j===1&&tab==='Mesin'?<span className={'status-badge '+(c==='Aktif'?'verified':'pending')}>{c}</span>:c}</td>)}<td><button className="text-btn">Edit</button></td></tr>)}</tbody>
-    </table></div></div>
-    {modal&&<Modal title={'Tambah '+tab} onClose={()=>setModal(false)}><div className="form-grid"><label>Nama<input placeholder="Masukkan nama"/></label><label>Keterangan<input placeholder="Masukkan keterangan"/></label></div><button className="primary-btn full" onClick={()=>setModal(false)}>Simpan Data</button></Modal>}
+    <SyncError error={error}/>
+    <div className="panel"><div className="panel-head"><h3>Customer &amp; Item</h3></div><div className="table-wrap"><table>
+      <thead><tr><th>Nama Customer</th><th>Nama Item</th><th>Jumlah</th><th>Nomor PO</th><th>Aksi</th></tr></thead>
+      <tbody>{records.map(record=><tr key={record.id}><td>{record.customer_name}</td><td>{record.item_name}</td><td>{record.quantity}</td><td>{record.po_number||'—'}</td><td><button className="text-btn" onClick={()=>openEdit(record)}>Edit</button></td></tr>)}</tbody>
+    </table>{loading&&<p className="table-message">Memuat data...</p>}{!loading&&!records.length&&!error&&<p className="table-message">Belum ada data. Klik “Tambah Data” untuk memulai.</p>}</div></div>
+    {modal&&<Modal title={editingId?'Edit Data Master':'Tambah Data Master'} onClose={closeModal}>
+      <form className="form-grid" onSubmit={saveRecord}>
+        {error&&<div className="sync-error form-alert" role="alert">Gagal menyimpan: {error}</div>}
+        <label>Nama Customer<input required value={form.customerName} onChange={event=>setForm({...form,customerName:event.target.value})} placeholder="Masukkan nama customer"/></label>
+        <label>Nama Item<input required value={form.itemName} onChange={event=>setForm({...form,itemName:event.target.value})} placeholder="Masukkan nama item"/></label>
+        <label>Jumlah<input required type="number" min="0" step="1" value={form.quantity} onChange={event=>setForm({...form,quantity:event.target.value})} placeholder="Masukkan jumlah"/></label>
+        <label>Nomor PO (opsional)<input value={form.poNumber} onChange={event=>setForm({...form,poNumber:event.target.value})} placeholder="Boleh dikosongkan"/></label>
+        <button className="primary-btn full form-submit" type="submit" disabled={saving}>{saving?'Menyimpan...':'Simpan Data'}</button>
+      </form>
+    </Modal>}
   </div>;
 }
 
 function AdminInventory() {
-  return <div><div className="page-title"><div><span>Stok & Tracking</span><h1>Inventori Tools</h1></div><button className="primary-btn"><Plus size={16}/> Barang Masuk</button></div><div className="kpi-grid"><div className="kpi-card"><span>Tools Baru</span><strong>248</strong></div><div className="kpi-card"><span>Tools Re-usable</span><strong>96</strong></div><div className="kpi-card"><span>Afkir / Rusak</span><strong>12</strong></div><div className="kpi-card"><span>Tools Aktif Dipakai</span><strong>34</strong></div></div><div className="panel"><div className="panel-head"><h3>Stok Inventori</h3><div className="search"><Search size={16}/><input placeholder="Cari tools"/></div></div><div className="table-wrap"><table><thead><tr><th>Nama Tools</th><th>Stok Baru</th><th>Bekas Re-usable</th><th>Afkir / Rusak</th><th>Batas Minimal</th><th>Status</th></tr></thead><tbody>{[['Milling 10','42','18','4','15'],['Endmill 12','28','12','2','10'],['Mata Gurinda','86','0','8','30'],['Kikir 8','35','9','1','12']].map((r,i)=><tr key={i}>{r.map((c,j)=><td key={j}>{j===5?<span className="status-badge verified">Cukup</span>:c}</td>)}</tr>)}</tbody></table></div></div></div>;
+  const [records,setRecords]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [error,setError]=useState('');
+  const [saving,setSaving]=useState(false);
+  const [modal,setModal]=useState(false);
+  const [editingId,setEditingId]=useState(null);
+  const [form,setForm]=useState({toolName:'',specification:'',quantity:''});
+  const refresh=useCallback(async()=>{
+    const {data,error:queryError}=await supabase.from('tools_inventory')
+      .select('id,tool_name,specification,quantity').order('created_at',{ascending:false});
+    if(queryError){setError(queryError.message);setLoading(false);return;}
+    setError('');
+    setRecords(data);
+    setLoading(false);
+  },[]);
+  useEffect(()=>{refresh();},[refresh]);
+  const closeModal=()=>{
+    setModal(false);
+    setEditingId(null);
+    setForm({toolName:'',specification:'',quantity:''});
+  };
+  const openEdit=record=>{
+    setEditingId(record.id);
+    setForm({toolName:record.tool_name,specification:record.specification,quantity:String(record.quantity)});
+    setModal(true);
+  };
+  const saveTool=async event=>{
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    const values={
+      tool_name:form.toolName.trim(),
+      specification:form.specification.trim(),
+      quantity:Number(form.quantity)
+    };
+    const result=editingId
+      ? await supabase.from('tools_inventory').update(values).eq('id',editingId).select('id').single()
+      : await supabase.from('tools_inventory').insert(values);
+    if(result.error){setError(result.error.message);setSaving(false);return;}
+    await refresh();
+    setSaving(false);
+    closeModal();
+  };
+  return <div>
+    <div className="page-title"><div><span>Stok &amp; Tracking</span><h1>Inventori Tools</h1></div><button className="primary-btn" onClick={()=>setModal(true)}><Plus size={16}/> Tambah Item</button></div>
+    <div className="kpi-grid"><div className="kpi-card"><span>Total Jenis Tools</span><strong>{records.length}</strong></div><div className="kpi-card"><span>Total Jumlah</span><strong>{records.reduce((total,record)=>total+record.quantity,0)}</strong><small>pcs</small></div></div>
+    <SyncError error={error}/>
+    <div className="panel"><div className="panel-head"><h3>Stok Inventori</h3></div><div className="table-wrap"><table><thead><tr><th>Nama Tools</th><th>Spesifikasi</th><th>Jumlah</th><th>Aksi</th></tr></thead><tbody>{records.map(record=><tr key={record.id}><td>{record.tool_name}</td><td>{record.specification}</td><td>{record.quantity}</td><td><button className="text-btn" onClick={()=>openEdit(record)}>Edit</button></td></tr>)}</tbody></table>{loading&&<p className="table-message">Memuat data...</p>}{!loading&&!records.length&&!error&&<p className="table-message">Belum ada item. Klik “Tambah Item” untuk memulai.</p>}</div></div>
+    {modal&&<Modal title={editingId?'Edit Tools':'Tambah Item Tools'} onClose={closeModal}>
+      <form className="form-grid" onSubmit={saveTool}>
+        {error&&<div className="sync-error form-alert" role="alert">Gagal menyimpan: {error}</div>}
+        <label>Nama Tools<input required value={form.toolName} onChange={event=>setForm({...form,toolName:event.target.value})} placeholder="Masukkan nama tools"/></label>
+        <label>Spesifikasi<input required value={form.specification} onChange={event=>setForm({...form,specification:event.target.value})} placeholder="Masukkan spesifikasi"/></label>
+        <label>Jumlah<input required type="number" min="0" step="1" value={form.quantity} onChange={event=>setForm({...form,quantity:event.target.value})} placeholder="Masukkan jumlah"/></label>
+        <button className="primary-btn full form-submit" type="submit" disabled={saving}>{saving?'Menyimpan...':'Simpan Item'}</button>
+      </form>
+    </Modal>}
+  </div>;
 }
 
 function AdminAttendance() {

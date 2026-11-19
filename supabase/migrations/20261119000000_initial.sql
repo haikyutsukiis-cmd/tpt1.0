@@ -50,20 +50,45 @@ create table if not exists public.production_reports (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.master_data (
+  id uuid primary key default gen_random_uuid(),
+  customer_name text not null,
+  item_name text not null,
+  quantity integer not null check (quantity >= 0),
+  po_number text,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.tools_inventory (
+  id uuid primary key default gen_random_uuid(),
+  tool_name text not null,
+  specification text not null,
+  quantity integer not null check (quantity >= 0),
+  created_at timestamptz not null default now()
+);
+
 create index if not exists attendance_records_shift_date_idx
   on public.attendance_records (shift_date desc);
 create index if not exists production_reports_created_at_idx
   on public.production_reports (created_at desc);
+create index if not exists master_data_created_at_idx
+  on public.master_data (created_at desc);
+create index if not exists tools_inventory_created_at_idx
+  on public.tools_inventory (created_at desc);
 
 alter table public.profiles enable row level security;
 alter table public.attendance_records enable row level security;
 alter table public.production_reports enable row level security;
+alter table public.master_data enable row level security;
+alter table public.tools_inventory enable row level security;
 
 drop policy if exists "users can read their own profile" on public.profiles;
 drop policy if exists "operators and managers can read attendance" on public.attendance_records;
 drop policy if exists "admins can review attendance" on public.attendance_records;
 drop policy if exists "operators and managers can read production" on public.production_reports;
 drop policy if exists "admins can review production" on public.production_reports;
+drop policy if exists "admins can manage master data" on public.master_data;
+drop policy if exists "admins can manage tools inventory" on public.tools_inventory;
 
 create policy "users can read their own profile"
   on public.profiles for select to authenticated
@@ -93,11 +118,23 @@ create policy "admins can review production"
   using (public.current_profile_role() = 'admin')
   with check (public.current_profile_role() = 'admin');
 
+create policy "admins can manage master data"
+  on public.master_data for all to authenticated
+  using (public.current_profile_role() = 'admin')
+  with check (public.current_profile_role() = 'admin');
+
+create policy "admins can manage tools inventory"
+  on public.tools_inventory for all to authenticated
+  using (public.current_profile_role() = 'admin')
+  with check (public.current_profile_role() = 'admin');
+
 grant select on public.profiles to authenticated;
 grant select on public.attendance_records to authenticated;
 grant update (verification_status, reviewed_at) on public.attendance_records to authenticated;
 grant select on public.production_reports to authenticated;
 grant update (verification_status, reviewed_at) on public.production_reports to authenticated;
+grant select, insert, update, delete on public.master_data to authenticated;
+grant select, insert, update, delete on public.tools_inventory to authenticated;
 
 create or replace function public.operator_clock_in(p_shift_date date)
 returns public.attendance_records
