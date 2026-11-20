@@ -169,6 +169,29 @@ function useRemoteRecords(table) {
   return {records,error,refresh,rpc,setVerificationStatus};
 }
 
+function useMasterDataRecords() {
+  const [records,setRecords]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [error,setError]=useState('');
+  const refresh=useCallback(async()=>{
+    const {data,error:queryError}=await supabase.from('master_data')
+      .select('id,customer_name,item_name,quantity,qty_in_progress,qty_shipped,po_number')
+      .order('created_at',{ascending:false});
+    if(queryError){setError(queryError.message);setLoading(false);return;}
+    setError('');
+    setRecords(data);
+    setLoading(false);
+  },[]);
+  useEffect(()=>{
+    refresh();
+    const channel=supabase.channel('live-master-data')
+      .on('postgres_changes',{event:'*',schema:'public',table:'master_data'},refresh)
+      .subscribe(status=>{if(status==='CHANNEL_ERROR')setError('Koneksi realtime Master Data gagal.');});
+    return ()=>{supabase.removeChannel(channel);};
+  },[refresh]);
+  return {records,loading,error,refresh};
+}
+
 function SyncError({error}) {
   return error?<div className="sync-error" role="alert">Sinkronisasi gagal: {error}</div>:null;
 }
@@ -268,7 +291,7 @@ function AppShell({ role, profile, onLogout, children }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const navByRole = {
     OPERATOR: [['dashboard','Beranda'],['production','SPK Produksi'],['attendance','Absensi'],['tools','Tools']],
-    ADMIN: [['dashboard','Ringkasan'],['production','Produksi & SPK'],['attendance','Absensi'],['master','Master Data'],['inventory','Inventori'],['reports','Laporan']],
+    ADMIN: [['dashboard','Ringkasan'],['production','Produksi & SPK'],['attendance','Absensi'],['master','Master Data'],['inventory','Inventori Tools'],['materials','Inventori Material'],['reports','Laporan']],
     BOSS: [['dashboard','Ringkasan'],['production','Progres PO'],['performance','Performa'],['tools','Efisiensi Tools'],['reports','Laporan']]
   };
   const [active, setActive] = useState('dashboard');
@@ -293,7 +316,7 @@ function AppShell({ role, profile, onLogout, children }) {
 }
 
 function iconFor(id) {
-  const icons={dashboard:<LayoutDashboard size={19}/>,production:<ClipboardList size={19}/>,attendance:<CalendarCheck size={19}/>,tools:<Wrench size={19}/>,master:<Users size={19}/>,inventory:<Package size={19}/>,reports:<Download size={19}/>,performance:<BarChart3 size={19}/>}
+  const icons={dashboard:<LayoutDashboard size={19}/>,production:<ClipboardList size={19}/>,attendance:<CalendarCheck size={19}/>,tools:<Wrench size={19}/>,master:<Users size={19}/>,inventory:<Package size={19}/>,materials:<Box size={19}/>,reports:<Download size={19}/>,performance:<BarChart3 size={19}/>}
   return icons[id];
 }
 
@@ -303,6 +326,11 @@ function Operator({ active, setActive, profile }) {
   const [modal,setModal]=useState(null);
   const attendanceApi=useRemoteRecords('attendance_records');
   const productionApi=useRemoteRecords('production_reports');
+  const masterDataApi=useMasterDataRecords();
+  const activeOrders=masterDataApi.records.filter(record=>record.quantity-record.qty_shipped>0);
+  const outstandingTotal=masterDataApi.records.reduce(
+    (total,record)=>total+Math.max(0,record.quantity-record.qty_shipped),0
+  );
   const today=getLocalDateKey();
   const attendanceRecord=attendanceApi.records.find(record=>record.operator===operator&&record.date===today);
   const attended=Boolean(attendanceRecord?.checkIn);
@@ -321,7 +349,7 @@ function Operator({ active, setActive, profile }) {
   if(active==='tools') return <OperatorTools operator={operator} />;
   return <div>
     <div className="page-title"><div><span>Hari Ini · {todayLabel}</span><h1>Selamat Bekerja, {operator}</h1></div></div>
-    <SyncError error={attendanceApi.error||productionApi.error}/>
+    <SyncError error={attendanceApi.error||productionApi.error||masterDataApi.error}/>
     <div className="operator-status">
       <div className="status-card"><div className="status-icon green"><Clock3/></div><div><span>Status Kehadiran</span><strong>{attendanceRecord?.checkOut?'Sudah Absen Pulang':clocked?'Sudah Absen Masuk':'Belum Absen Masuk'}</strong></div></div>
       <button className="primary-btn" onClick={()=>setActive('attendance')}>{attended?'Kelola Absensi':'Absen Sekarang'} <ChevronDown size={16}/></button>
@@ -329,14 +357,21 @@ function Operator({ active, setActive, profile }) {
     <div className="section-head"><h2>Informasi Kerja</h2></div>
     <div className="kpi-grid operator-kpi">
       <div className="kpi-card"><span>Hasil Hari Ini</span><strong>84</strong><small className="positive">+12% dari kemarin</small></div>
-      <div className="kpi-card"><span>Outstanding Item</span><strong>3</strong><small>156 pcs tersisa</small></div>
+      <div className="kpi-card"><span>Outstanding Item</span><strong>{activeOrders.length}</strong><small>{outstandingTotal.toLocaleString('id-ID')} pcs tersisa</small></div>
       <div className="kpi-card"><span>Efisiensi</span><strong>92%</strong><small className="positive">Irit tools</small></div>
     </div>
     <div className="two-col">
-      <div className="panel"><div className="panel-head"><h3>Loading Line</h3><button onClick={()=>setActive('production')}>Lihat Semua</button></div>
-        <LoadingLine item="72559" progress={68} qty="68 / 100 pcs"/>
-        <LoadingLine item="H122-AD1-9810" progress={42} qty="42 / 100 pcs"/>
-        <LoadingLine item="RUMAH KONIS" progress={81} qty="81 / 100 pcs"/>
+      <div className="panel"><div className="panel-head"><h3>Master Data &amp; Outstanding Aktual</h3><span className="live-dot">LIVE</span></div>
+        <div className="table-wrap"><table><thead><tr><th>Customer / PO</th><th>Produk</th><th>Target</th><th>Berjalan</th><th>Terkirim</th><th>Outstanding</th></tr></thead><tbody>
+          {masterDataApi.records.map(record=><tr key={record.id}>
+            <td><strong>{record.customer_name}</strong>{record.po_number&&<small>{record.po_number}</small>}</td>
+            <td>{record.item_name}</td><td>{record.quantity} pcs</td><td>{record.qty_in_progress} pcs</td><td>{record.qty_shipped} pcs</td>
+            <td><strong>{Math.max(0,record.quantity-record.qty_shipped)} pcs</strong></td>
+          </tr>)}
+        </tbody></table>
+          {masterDataApi.loading&&<p className="table-message">Memuat Master Data...</p>}
+          {!masterDataApi.loading&&!masterDataApi.records.length&&!masterDataApi.error&&<p className="table-message">Belum ada data Master Data.</p>}
+        </div>
       </div>
       <div className="panel"><div className="panel-head"><h3>Aksi Cepat</h3></div>
         <div className="quick-actions">
@@ -417,14 +452,84 @@ function Production({operator,clocked,setActive,productionApi}) {
 function OperatorTools({operator}) {
   const [tab,setTab]=useState('Ambil');
   const [machine,setMachine]=useState('VMC 850');
-  const [tool,setTool]=useState('Milling');
-  const [size,setSize]=useState('10');
-  const code=`MIL${size}-${operator.slice(0,3).toUpperCase()}-${machine.match(/\d+/)?.[0]||850}-0815`;
+  const [toolId,setToolId]=useState('');
+  const [quantity,setQuantity]=useState('1');
+  const [itemCondition,setItemCondition]=useState('Baru');
+  const [inventory,setInventory]=useState([]);
+  const [activeUsage,setActiveUsage]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [saving,setSaving]=useState(false);
+  const [error,setError]=useState('');
   const [toast,setToast]=useState('');
+  const refresh=useCallback(async()=>{
+    const [inventoryResult,usageResult]=await Promise.all([
+      supabase.from('tools_inventory').select('id,tool_name,specification,quantity').order('tool_name'),
+      supabase.from('tool_usage')
+        .select('id,tool_id,quantity,item_condition,created_at')
+        .eq('usage_status','Dipakai').order('created_at',{ascending:false})
+    ]);
+    const errors=[inventoryResult.error,usageResult.error].filter(Boolean);
+    if(errors.length){setError(errors.map(result=>result.message).join(' '));setLoading(false);return;}
+    setError('');
+    setInventory(inventoryResult.data);
+    setActiveUsage(usageResult.data);
+    setLoading(false);
+  },[]);
+  useEffect(()=>{
+    refresh();
+    const channel=supabase.channel('operator-tools-live')
+      .on('postgres_changes',{event:'*',schema:'public',table:'tools_inventory'},refresh)
+      .on('postgres_changes',{event:'*',schema:'public',table:'tool_usage'},refresh)
+      .subscribe(status=>{if(status==='CHANNEL_ERROR')setError('Koneksi realtime tools gagal.');});
+    return ()=>{supabase.removeChannel(channel);};
+  },[refresh]);
+  const takeTool=async event=>{
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    const {error:takeError}=await supabase.rpc('operator_take_tool',{
+      p_tool_id:toolId,p_quantity:Number(quantity),p_machine:machine,p_item_condition:itemCondition
+    });
+    if(takeError){setError(takeError.message);setSaving(false);return;}
+    await refresh();
+    setToast('Pengambilan tools berhasil dicatat dan stok diperbarui.');
+    setSaving(false);
+  };
+  const returnTool=async (usageId,condition)=>{
+    setError('');
+    const {error:returnError}=await supabase.rpc('operator_return_tool',{
+      p_usage_id:usageId,p_return_condition:condition
+    });
+    if(returnError){setError(returnError.message);return;}
+    await refresh();
+    setToast(condition==='Masih Layak / Bekas'
+      ? 'Pengembalian dicatat dan stok tersedia ditambahkan kembali.'
+      : 'Pengembalian dicatat; tools tidak ditambahkan kembali ke stok.');
+  };
   return <div><div className="page-title"><div><span>Manajemen Tools</span><h1>Pengambilan &amp; Pengembalian</h1></div></div>
     <div className="segmented"><button className={tab==='Ambil'?'active':''} onClick={()=>setTab('Ambil')}>Ambil Tools</button><button className={tab==='Kembali'?'active':''} onClick={()=>setTab('Kembali')}>Pengembalian</button><button className={tab==='Serah'?'active':''} onClick={()=>setTab('Serah')}>Serah Terima Shift</button></div>
-    {tab==='Ambil'&&<div className="panel tool-form"><div className="form-grid"><label>Nama Tools<select value={tool} onChange={e=>setTool(e.target.value)}><option>Milling</option><option>Endmill</option><option>Kikir</option><option>Mata Gurinda</option></select></label><label>Ukuran<input value={size} onChange={e=>setSize(e.target.value)}/></label><label>Mesin Digunakan<select value={machine} onChange={e=>setMachine(e.target.value)}>{MACHINES.map(m=><option key={m}>{m}</option>)}</select></label><label>Jumlah (Qty)<input type="number" defaultValue="1"/></label><label>Status Barang<select><option>Baru</option><option>Bekas</option></select></label></div><div className="tool-code"><span>Kode Unik</span><strong>{code}</strong></div><button className="primary-btn" onClick={()=>setToast('Pengambilan tools berhasil dicatat')}>Ambil Tools</button></div>}
-    {tab==='Kembali'&&<div className="panel tool-form"><label>Masukkan / Scan Kode Unik<input placeholder="Contoh: MIL10-AMR-850-0815"/></label><div className="condition-grid">{['Tumpul','Patah','Masih Layak / Bekas'].map(c=><button key={c} onClick={()=>setToast(`Pengembalian dikonfirmasi: ${c}`)}>{c}</button>)}</div></div>}
+    <SyncError error={error}/>
+    {tab==='Ambil'&&<form className="panel tool-form" onSubmit={takeTool}>
+      <div className="form-grid">
+        <label>Nama Tools<select required value={toolId} onChange={event=>setToolId(event.target.value)}><option value="">Pilih tools inventori</option>{inventory.map(item=><option key={item.id} value={item.id} disabled={item.quantity===0}>{item.tool_name} · {item.specification} (stok {item.quantity})</option>)}</select></label>
+        <label>Mesin Digunakan<select value={machine} onChange={event=>setMachine(event.target.value)}>{MACHINES.map(item=><option key={item}>{item}</option>)}</select></label>
+        <label>Jumlah (Qty)<input required type="number" min="1" step="1" value={quantity} onChange={event=>setQuantity(event.target.value)}/></label>
+        <label>Status Barang<select value={itemCondition} onChange={event=>setItemCondition(event.target.value)}><option>Baru</option><option>Bekas</option></select></label>
+      </div>
+      {!loading&&!inventory.length&&!error&&<p className="table-message">Belum ada tools di inventori. Hubungi Admin untuk menambahkan stok.</p>}
+      <button className="primary-btn" type="submit" disabled={saving||loading||!inventory.some(item=>item.id===toolId&&item.quantity>0)}>{saving?'Mencatat...':'Ambil Tools & Kurangi Stok'}</button>
+    </form>}
+    {tab==='Kembali'&&<div className="panel tool-form">
+      <div className="panel-head"><h3>Tools yang Sedang Dipakai · {operator}</h3></div>
+      {activeUsage.map(usage=>{
+        const item=inventory.find(record=>record.id===usage.tool_id);
+        return <div className="tool-return-row" key={usage.id}>
+          <div><strong>{item?`${item.tool_name} · ${item.specification}`:'Tools'}</strong><span>{usage.quantity} pcs · {usage.item_condition} · {formatAttendanceTimestamp(usage.created_at)}</span></div>
+          <div className="condition-grid">{['Tumpul','Patah','Masih Layak / Bekas'].map(condition=><button key={condition} onClick={()=>returnTool(usage.id,condition)}>{condition}</button>)}</div>
+        </div>;
+      })}
+      {!loading&&!activeUsage.length&&!error&&<p className="table-message">Tidak ada tools yang menunggu pengembalian.</p>}
+    </div>}
     {tab==='Serah'&&<div className="panel tool-form"><div className="form-grid"><label>Operator Penerima<select>{OPERATORS.map(o=><option key={o}>{o}</option>)}</select></label><label>Shift Tujuan<select><option>Shift 2</option><option>Shift 1</option></select></label><label>Tools yang Diserahkan<input defaultValue="Milling 10 - 1 pcs"/></label><label>Catatan Hasil Kerja<input defaultValue="Hasil sesuai SPK"/></label></div><div className="tool-code"><span>Kode Serah Terima Baru</span><strong>HD-10-AMR-S2-0830</strong></div><button className="primary-btn" onClick={()=>setToast('Serah terima shift berhasil dicatat')}>Konfirmasi Serah Terima</button></div>}
     {toast&&<div className="toast"><Check size={17}/>{toast}<button onClick={()=>setToast('')}><X size={14}/></button></div>}
   </div>;
@@ -433,6 +538,7 @@ function OperatorTools({operator}) {
 function Admin({active}) {
   if(active==='master') return <AdminMaster/>;
   if(active==='inventory') return <AdminInventory/>;
+  if(active==='materials') return <AdminMaterials/>;
   if(active==='attendance') return <AdminAttendance/>;
   if(active==='reports') return <AdminReports/>;
   if(active==='production') return <AdminProduction/>;
@@ -444,7 +550,64 @@ function StatCards() {
 }
 
 function AdminDashboard({setActive}) {
-  return <div><div className="page-title"><div><span>19 November 2026 · Shift 1</span><h1>Ringkasan Operasional</h1></div><button className="outline-btn" onClick={()=>downloadExcel('ringkasan-operasional','Ringkasan',[['Indikator','Nilai'],['Produksi Hari Ini',1284],['Outstanding PO',3450],['Efisiensi Tools','94%'],['Menunggu Verifikasi',18]])}><Download size={16}/> Ekspor Excel</button></div><StatCards/><div className="two-col admin-overview"><div className="panel"><div className="panel-head"><h3>Loading Line Mesin</h3><span className="live-dot">LIVE</span></div>{['VMC 850','VMC 650','HYUNDAI','KASUGA'].map((m,i)=><LoadingLine key={m} item={m} progress={[72,48,86,35][i]} qty={[216,128,172,84][i]+' pcs'}/>)}</div><div className="panel"><div className="panel-head"><h3>Verifikasi Produksi</h3><b>18 pending</b></div><LiveTable compact/></div></div></div>;
+  return <div><div className="page-title"><div><span>19 November 2026 · Shift 1</span><h1>Ringkasan Operasional</h1></div><button className="outline-btn" onClick={()=>downloadExcel('ringkasan-operasional','Ringkasan',[['Indikator','Nilai'],['Produksi Hari Ini',1284],['Outstanding PO',3450],['Efisiensi Tools','94%'],['Menunggu Verifikasi',18]])}><Download size={16}/> Ekspor Excel</button></div><StatCards/><div className="two-col admin-overview"><div className="panel"><div className="panel-head"><h3>Loading Line Mesin</h3><span className="live-dot">LIVE</span></div>{['VMC 850','VMC 650','HYUNDAI','KASUGA'].map((m,i)=><LoadingLine key={m} item={m} progress={[72,48,86,35][i]} qty={[216,128,172,84][i]+' pcs'}/>)}</div><div className="panel"><div className="panel-head"><h3>Verifikasi Produksi</h3><b>18 pending</b></div><LiveTable compact/></div></div><AdminToolUsageChart/></div>;
+}
+
+function AdminToolUsageChart() {
+  const [tools,setTools]=useState([]);
+  const [usage,setUsage]=useState([]);
+  const [error,setError]=useState('');
+  const refresh=useCallback(async()=>{
+    const [toolsResult,usageResult]=await Promise.all([
+      supabase.from('tools_inventory').select('id,tool_name,specification'),
+      supabase.from('tool_usage').select('tool_id,quantity,usage_status')
+    ]);
+    const errors=[toolsResult.error,usageResult.error].filter(Boolean);
+    if(errors.length){setError(errors.map(result=>result.message).join(' '));return;}
+    setError('');
+    setTools(toolsResult.data);
+    setUsage(usageResult.data);
+  },[]);
+  useEffect(()=>{
+    refresh();
+    const channel=supabase.channel('admin-tool-usage-chart')
+      .on('postgres_changes',{event:'*',schema:'public',table:'tools_inventory'},refresh)
+      .on('postgres_changes',{event:'*',schema:'public',table:'tool_usage'},refresh)
+      .subscribe(status=>{if(status==='CHANNEL_ERROR')setError('Koneksi realtime bagan pemakaian tools gagal.');});
+    return ()=>{supabase.removeChannel(channel);};
+  },[refresh]);
+  const totals=usage.reduce((result,record)=>{
+    const total=result[record.tool_id]||{used:0,active:0};
+    total.used+=record.quantity;
+    if(record.usage_status==='Dipakai')total.active+=record.quantity;
+    result[record.tool_id]=total;
+    return result;
+  },{});
+  const rows=tools.map(tool=>({
+    id:tool.id,
+    name:tool.tool_name,
+    specification:tool.specification,
+    ...(totals[tool.id]||{used:0,active:0})
+  })).filter(tool=>tool.used>0).sort((a,b)=>b.used-a.used);
+  const maximum=Math.max(1,...rows.map(tool=>tool.used));
+  return <div className="panel tool-usage-chart">
+    <div className="panel-head"><h3>Bagan Pemakaian Tools</h3><span className="live-dot">LIVE</span></div>
+    <p className="chart-caption">Jumlah tools yang tercatat dipakai, dibedakan antara masih dipakai dan sudah dikembalikan.</p>
+    <SyncError error={error}/>
+    {rows.length?<div className="tool-chart-rows">{rows.map(tool=>{
+      const activeWidth=(tool.active/maximum)*100;
+      const returnedWidth=((tool.used-tool.active)/maximum)*100;
+      return <div className="tool-chart-row" key={tool.id}>
+        <div className="tool-chart-label"><strong>{tool.name}</strong><span>{tool.specification}</span></div>
+        <div className="tool-chart-track" aria-label={`${tool.used} pcs digunakan`}>
+          <i className="tool-chart-active" style={{width:`${activeWidth}%`}}/>
+          <i className="tool-chart-returned" style={{width:`${returnedWidth}%`}}/>
+        </div>
+        <b>{tool.used} pcs</b>
+      </div>;
+    })}</div>:!error?<p className="table-message">Belum ada data pemakaian tools untuk ditampilkan.</p>:null}
+    <div className="tool-chart-legend"><span><i className="tool-chart-active"/>Sedang dipakai</span><span><i className="tool-chart-returned"/>Sudah dikembalikan</span></div>
+  </div>;
 }
 
 function VerificationActions({status,onChange,approveLabel='Verifikasi',rejectLabel='Tidak disetujui'}) {
@@ -455,15 +618,16 @@ function VerificationActions({status,onChange,approveLabel='Verifikasi',rejectLa
   </div>;
 }
 
-function LiveTableView({records,error,setVerificationStatus}) {
+function LiveTableView({records,error,setVerificationStatus,onEdit}) {
   const updateStatus=id=>status=>()=>setVerificationStatus(id,status);
   return <div className="table-wrap"><table>
-    <thead><tr><th>SPK</th><th>Operator</th><th>Mesin</th><th>Item</th><th>OP</th><th>OKE</th><th>Verifikasi Pekerjaan</th></tr></thead>
+    <thead><tr><th>SPK</th><th>Operator</th><th>Mesin</th><th>Item</th><th>OP</th><th>OKE</th><th>Repair</th><th>NG</th><th>Verifikasi Pekerjaan</th>{onEdit&&<th>Aksi</th>}</tr></thead>
     <tbody>{records.map(report=><tr key={report.id}>
-      <td>{report.code}</td><td>{report.operator}</td><td>{report.machine}</td><td>{report.item}</td><td>{report.op}</td><td>{report.oke}</td>
+      <td>{report.code}</td><td>{report.operator}</td><td>{report.machine}</td><td>{report.item}</td><td>{report.op}</td><td>{report.oke}</td><td>{report.repair}</td><td>{report.ng}</td>
       <td><VerificationActions status={report.status} onChange={updateStatus(report.id)}/></td>
+      {onEdit&&<td><button className="text-btn" onClick={()=>onEdit(report)}>Edit hasil</button></td>}
     </tr>)}</tbody>
-    {error&&<tfoot><tr><td colSpan="7"><SyncError error={error}/></td></tr></tfoot>}
+    {error&&<tfoot><tr><td colSpan={onEdit?10:9}><SyncError error={error}/></td></tr></tfoot>}
   </table></div>;
 }
 
@@ -474,34 +638,63 @@ function LiveTable() {
 
 function AdminProduction() {
   const api=useRemoteRecords('production_reports');
+  const [editingReport,setEditingReport]=useState(null);
+  const [actualValues,setActualValues]=useState({oke:'0',repair:'0',ng:'0',status:'Pending'});
+  const [saving,setSaving]=useState(false);
+  const [editError,setEditError]=useState('');
+  const openEdit=report=>{
+    setEditingReport(report);
+    setActualValues({oke:String(report.oke),repair:String(report.repair),ng:String(report.ng),status:report.status});
+    setEditError('');
+  };
+  const saveActualResult=async event=>{
+    event.preventDefault();
+    setSaving(true);
+    setEditError('');
+    const status=actualValues.status;
+    const {error}=await supabase.from('production_reports').update({
+      qty_oke:Number(actualValues.oke),
+      qty_repair:Number(actualValues.repair),
+      qty_ng:Number(actualValues.ng),
+      verification_status:status,
+      reviewed_at:status==='Pending'?null:new Date().toISOString()
+    }).eq('id',editingReport.id).select('id').single();
+    setSaving(false);
+    if(error){setEditError(error.message);return;}
+    setEditingReport(null);
+    await api.refresh();
+  };
   const exportRows=[
     ['SPK','Operator','Tanggal','Mesin','Item','OP','OKE','Repair','NG','Status Verifikasi'],
     ...api.records.map(report=>[report.code,report.operator,report.date,report.machine,report.item,report.op,report.oke,report.repair,report.ng,report.status])
   ];
-  return <div><div className="page-title"><div><span>Verifikasi &amp; Live Table</span><h1>Produksi &amp; SPK</h1></div><div className="report-actions"><button className="outline-btn" onClick={()=>downloadCsv('laporan-hasil-produksi',exportRows)}><Download size={16}/> CSV</button><button className="primary-btn" onClick={()=>downloadExcel('laporan-hasil-produksi','Produksi',exportRows)}><Download size={16}/> Excel</button></div></div><StatCards/><SyncError error={api.error}/><div className="panel"><div className="panel-head"><h3>Live Table Hasil Produksi</h3><div className="search"><Search size={16}/><input placeholder="Cari SPK / operator"/></div></div><LiveTableView {...api}/></div></div>;
+  return <div><div className="page-title"><div><span>Verifikasi &amp; Live Table</span><h1>Produksi &amp; SPK</h1></div><div className="report-actions"><button className="outline-btn" onClick={()=>downloadCsv('laporan-hasil-produksi',exportRows)}><Download size={16}/> CSV</button><button className="primary-btn" onClick={()=>downloadExcel('laporan-hasil-produksi','Produksi',exportRows)}><Download size={16}/> Excel</button></div></div><StatCards/><SyncError error={api.error}/><div className="panel"><div className="panel-head"><h3>Live Table Hasil Produksi</h3><div className="search"><Search size={16}/><input placeholder="Cari SPK / operator"/></div></div><LiveTableView {...api} onEdit={openEdit}/></div>
+    {editingReport&&<Modal title={`Koreksi Hasil Aktual · ${editingReport.code}`} wide onClose={()=>setEditingReport(null)}>
+      <form className="form-grid" onSubmit={saveActualResult}>
+        <p className="edit-result-caption">Masukkan jumlah aktual berdasarkan hasil pemeriksaan untuk {editingReport.operator} · {editingReport.machine} · {editingReport.item}.</p>
+        <label>OKE aktual<input required type="number" min="0" step="1" value={actualValues.oke} onChange={event=>setActualValues({...actualValues,oke:event.target.value})}/></label>
+        <label>Repair aktual<input required type="number" min="0" step="1" value={actualValues.repair} onChange={event=>setActualValues({...actualValues,repair:event.target.value})}/></label>
+        <label>NG aktual<input required type="number" min="0" step="1" value={actualValues.ng} onChange={event=>setActualValues({...actualValues,ng:event.target.value})}/></label>
+        <label>Status verifikasi<select value={actualValues.status} onChange={event=>setActualValues({...actualValues,status:event.target.value})}><option>Pending</option><option>Terverifikasi</option><option>Tidak disetujui</option></select></label>
+        {editError&&<div className="sync-error form-alert" role="alert">Gagal menyimpan hasil aktual: {editError}</div>}
+        <button className="primary-btn full form-submit" type="submit" disabled={saving}>{saving?'Menyimpan...':'Simpan Hasil Aktual'}</button>
+      </form>
+    </Modal>}
+  </div>;
 }
 
 function AdminMaster() {
-  const [records,setRecords]=useState([]);
-  const [loading,setLoading]=useState(true);
-  const [error,setError]=useState('');
+  const api=useMasterDataRecords();
   const [saving,setSaving]=useState(false);
   const [modal,setModal]=useState(false);
   const [editingId,setEditingId]=useState(null);
-  const [form,setForm]=useState({customerName:'',itemName:'',quantity:'',poNumber:''});
-  const refresh=useCallback(async()=>{
-    const {data,error:queryError}=await supabase.from('master_data')
-      .select('id,customer_name,item_name,quantity,po_number').order('created_at',{ascending:false});
-    if(queryError){setError(queryError.message);setLoading(false);return;}
-    setError('');
-    setRecords(data);
-    setLoading(false);
-  },[]);
-  useEffect(()=>{refresh();},[refresh]);
+  const [formError,setFormError]=useState('');
+  const [form,setForm]=useState({customerName:'',itemName:'',quantity:'',qtyInProgress:'0',qtyShipped:'0',poNumber:''});
   const closeModal=()=>{
     setModal(false);
     setEditingId(null);
-    setForm({customerName:'',itemName:'',quantity:'',poNumber:''});
+    setForm({customerName:'',itemName:'',quantity:'',qtyInProgress:'0',qtyShipped:'0',poNumber:''});
+    setFormError('');
   };
   const openEdit=record=>{
     setEditingId(record.id);
@@ -509,41 +702,48 @@ function AdminMaster() {
       customerName:record.customer_name,
       itemName:record.item_name,
       quantity:String(record.quantity),
+      qtyInProgress:String(record.qty_in_progress),
+      qtyShipped:String(record.qty_shipped),
       poNumber:record.po_number||''
     });
+    setFormError('');
     setModal(true);
   };
   const saveRecord=async event=>{
     event.preventDefault();
     setSaving(true);
-    setError('');
+    setFormError('');
     const values={
       customer_name:form.customerName.trim(),
       item_name:form.itemName.trim(),
       quantity:Number(form.quantity),
+      qty_in_progress:Number(form.qtyInProgress),
+      qty_shipped:Number(form.qtyShipped),
       po_number:form.poNumber.trim()||null
     };
     const result=editingId
       ? await supabase.from('master_data').update(values).eq('id',editingId).select('id').single()
       : await supabase.from('master_data').insert(values);
-    if(result.error){setError(result.error.message);setSaving(false);return;}
-    await refresh();
+    if(result.error){setFormError(result.error.message);setSaving(false);return;}
+    await api.refresh();
     setSaving(false);
     closeModal();
   };
   return <div>
     <div className="page-title"><div><span>Konfigurasi Sistem</span><h1>Master Data</h1></div><button className="primary-btn" onClick={()=>setModal(true)}><Plus size={16}/> Tambah Data</button></div>
-    <SyncError error={error}/>
+    <SyncError error={api.error}/>
     <div className="panel"><div className="panel-head"><h3>Customer &amp; Item</h3></div><div className="table-wrap"><table>
-      <thead><tr><th>Nama Customer</th><th>Nama Item</th><th>Jumlah</th><th>Nomor PO</th><th>Aksi</th></tr></thead>
-      <tbody>{records.map(record=><tr key={record.id}><td>{record.customer_name}</td><td>{record.item_name}</td><td>{record.quantity}</td><td>{record.po_number||'—'}</td><td><button className="text-btn" onClick={()=>openEdit(record)}>Edit</button></td></tr>)}</tbody>
-    </table>{loading&&<p className="table-message">Memuat data...</p>}{!loading&&!records.length&&!error&&<p className="table-message">Belum ada data. Klik “Tambah Data” untuk memulai.</p>}</div></div>
-    {modal&&<Modal title={editingId?'Edit Data Master':'Tambah Data Master'} onClose={closeModal}>
+      <thead><tr><th>Nama Customer</th><th>Nama Produk</th><th>Target</th><th>Hasil Berjalan</th><th>Terkirim</th><th>Outstanding</th><th>Nomor PO</th><th>Aksi</th></tr></thead>
+      <tbody>{api.records.map(record=><tr key={record.id}><td>{record.customer_name}</td><td>{record.item_name}</td><td>{record.quantity} pcs</td><td>{record.qty_in_progress} pcs</td><td>{record.qty_shipped} pcs</td><td><strong>{Math.max(0,record.quantity-record.qty_shipped)} pcs</strong></td><td>{record.po_number||'—'}</td><td><button className="text-btn" onClick={()=>openEdit(record)}>Edit</button></td></tr>)}</tbody>
+    </table>{api.loading&&<p className="table-message">Memuat data...</p>}{!api.loading&&!api.records.length&&!api.error&&<p className="table-message">Belum ada data. Klik “Tambah Data” untuk memulai.</p>}</div></div>
+    {modal&&<Modal title={editingId?'Edit Data Master':'Tambah Data Master'} wide onClose={closeModal}>
       <form className="form-grid" onSubmit={saveRecord}>
-        {error&&<div className="sync-error form-alert" role="alert">Gagal menyimpan: {error}</div>}
+        {formError&&<div className="sync-error form-alert" role="alert">Gagal menyimpan: {formError}</div>}
         <label>Nama Customer<input required value={form.customerName} onChange={event=>setForm({...form,customerName:event.target.value})} placeholder="Masukkan nama customer"/></label>
-        <label>Nama Item<input required value={form.itemName} onChange={event=>setForm({...form,itemName:event.target.value})} placeholder="Masukkan nama item"/></label>
-        <label>Jumlah<input required type="number" min="0" step="1" value={form.quantity} onChange={event=>setForm({...form,quantity:event.target.value})} placeholder="Masukkan jumlah"/></label>
+        <label>Nama Produk / Item<input required value={form.itemName} onChange={event=>setForm({...form,itemName:event.target.value})} placeholder="Masukkan nama produk"/></label>
+        <label>Target Pesanan (pcs)<input required type="number" min="0" step="1" value={form.quantity} onChange={event=>setForm({...form,quantity:event.target.value})} placeholder="Jumlah target"/></label>
+        <label>Hasil Berjalan (pcs)<input required type="number" min="0" step="1" value={form.qtyInProgress} onChange={event=>setForm({...form,qtyInProgress:event.target.value})} placeholder="Jumlah produksi berjalan"/></label>
+        <label>Sudah Terkirim (pcs)<input required type="number" min="0" step="1" value={form.qtyShipped} onChange={event=>setForm({...form,qtyShipped:event.target.value})} placeholder="Jumlah sudah terkirim"/></label>
         <label>Nomor PO (opsional)<input value={form.poNumber} onChange={event=>setForm({...form,poNumber:event.target.value})} placeholder="Boleh dikosongkan"/></label>
         <button className="primary-btn full form-submit" type="submit" disabled={saving}>{saving?'Menyimpan...':'Simpan Data'}</button>
       </form>
@@ -551,8 +751,105 @@ function AdminMaster() {
   </div>;
 }
 
+function AdminMaterials() {
+  const [records,setRecords]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [error,setError]=useState('');
+  const [saving,setSaving]=useState(false);
+  const [modal,setModal]=useState(false);
+  const [editingId,setEditingId]=useState(null);
+  const [form,setForm]=useState({
+    customerName:'',materialName:'',materialSize:'',productName:'',
+    unit:'pcs',quantity:'',equivalentPcs:''
+  });
+  const refresh=useCallback(async()=>{
+    const {data,error:queryError}=await supabase.from('material_inventory')
+      .select('id,customer_name,material_name,material_size,product_name,quantity_pcs,quantity_bars,equivalent_pcs')
+      .order('created_at',{ascending:false});
+    if(queryError){setError(queryError.message);setLoading(false);return;}
+    setError('');
+    setRecords(data);
+    setLoading(false);
+  },[]);
+  useEffect(()=>{
+    refresh();
+    const channel=supabase.channel('admin-material-inventory')
+      .on('postgres_changes',{event:'*',schema:'public',table:'material_inventory'},refresh)
+      .subscribe(status=>{if(status==='CHANNEL_ERROR')setError('Koneksi realtime inventori material gagal.');});
+    return ()=>{supabase.removeChannel(channel);};
+  },[refresh]);
+  const closeModal=()=>{
+    setModal(false);
+    setEditingId(null);
+    setForm({customerName:'',materialName:'',materialSize:'',productName:'',unit:'pcs',quantity:'',equivalentPcs:''});
+  };
+  const openEdit=record=>{
+    const unit=record.quantity_bars>0?'batang':'pcs';
+    setEditingId(record.id);
+    setForm({
+      customerName:record.customer_name,
+      materialName:record.material_name,
+      materialSize:record.material_size,
+      productName:record.product_name,
+      unit,
+      quantity:String(unit==='batang'?record.quantity_bars:record.quantity_pcs),
+      equivalentPcs:String(record.equivalent_pcs)
+    });
+    setModal(true);
+  };
+  const saveMaterial=async event=>{
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    const quantity=Number(form.quantity);
+    const values={
+      customer_name:form.customerName.trim(),
+      material_name:form.materialName.trim(),
+      material_size:form.materialSize.trim(),
+      product_name:form.productName.trim(),
+      quantity_pcs:form.unit==='pcs'?quantity:0,
+      quantity_bars:form.unit==='batang'?quantity:0,
+      equivalent_pcs:form.unit==='pcs'?quantity:Number(form.equivalentPcs)
+    };
+    const result=editingId
+      ? await supabase.from('material_inventory').update(values).eq('id',editingId).select('id').single()
+      : await supabase.from('material_inventory').insert(values);
+    if(result.error){setError(result.error.message);setSaving(false);return;}
+    await refresh();
+    setSaving(false);
+    closeModal();
+  };
+  return <div>
+    <div className="page-title"><div><span>Stok Bahan Baku</span><h1>Inventori Material</h1></div><button className="primary-btn" onClick={()=>setModal(true)}><Plus size={16}/> Tambah Material</button></div>
+    <SyncError error={error}/>
+    <div className="panel"><div className="panel-head"><h3>Daftar Material</h3></div><div className="table-wrap"><table>
+      <thead><tr><th>Customer</th><th>Nama Bahan</th><th>Ukuran Bahan</th><th>Nama Produk</th><th>Jumlah (pcs)</th><th>Jumlah (batang)</th><th>Ekuivalen Total (pcs)</th><th>Aksi</th></tr></thead>
+      <tbody>{records.map(record=><tr key={record.id}>
+        <td>{record.customer_name}</td><td>{record.material_name}</td><td>{record.material_size}</td><td>{record.product_name}</td>
+        <td>{record.quantity_pcs}</td><td>{record.quantity_bars}</td><td>{record.equivalent_pcs}</td>
+        <td><button className="text-btn" onClick={()=>openEdit(record)}>Edit</button></td>
+      </tr>)}</tbody>
+    </table>{loading&&<p className="table-message">Memuat data material...</p>}{!loading&&!records.length&&!error&&<p className="table-message">Belum ada material. Klik “Tambah Material” untuk memulai.</p>}</div></div>
+    {modal&&<Modal title={editingId?'Edit Material':'Tambah Material'} wide onClose={closeModal}>
+      <form className="form-grid" onSubmit={saveMaterial}>
+        {error&&<div className="sync-error form-alert" role="alert">Gagal menyimpan material: {error}</div>}
+        <label>Nama Customer<input required value={form.customerName} onChange={event=>setForm({...form,customerName:event.target.value})}/></label>
+        <label>Nama Bahan<input required value={form.materialName} onChange={event=>setForm({...form,materialName:event.target.value})}/></label>
+        <label>Ukuran Bahan<input required value={form.materialSize} onChange={event=>setForm({...form,materialSize:event.target.value})} placeholder="Contoh: Ø10 x 6000 mm"/></label>
+        <label>Nama Produk<input required value={form.productName} onChange={event=>setForm({...form,productName:event.target.value})}/></label>
+        <label>Satuan Material<select value={form.unit} onChange={event=>setForm({...form,unit:event.target.value})}><option value="pcs">Pcs</option><option value="batang">Batang</option></select></label>
+        <label>Jumlah {form.unit==='pcs'?'(pcs)':'(batang)'}<input required type="number" min={form.unit==='batang'?'1':'0'} step="1" value={form.quantity} onChange={event=>setForm({...form,quantity:event.target.value})}/></label>
+        {form.unit==='batang'&&<label>Ekuivalen total (pcs)<input required type="number" min="1" step="1" value={form.equivalentPcs} onChange={event=>setForm({...form,equivalentPcs:event.target.value})} placeholder="Total pcs dari seluruh batang"/></label>}
+        <button className="primary-btn full form-submit" type="submit" disabled={saving}>{saving?'Menyimpan...':'Simpan Material'}</button>
+      </form>
+    </Modal>}
+  </div>;
+}
+
 function AdminInventory() {
   const [records,setRecords]=useState([]);
+  const [activeUsage,setActiveUsage]=useState([]);
+  const [usageHistory,setUsageHistory]=useState([]);
   const [loading,setLoading]=useState(true);
   const [error,setError]=useState('');
   const [saving,setSaving]=useState(false);
@@ -560,14 +857,31 @@ function AdminInventory() {
   const [editingId,setEditingId]=useState(null);
   const [form,setForm]=useState({toolName:'',specification:'',quantity:''});
   const refresh=useCallback(async()=>{
-    const {data,error:queryError}=await supabase.from('tools_inventory')
-      .select('id,tool_name,specification,quantity').order('created_at',{ascending:false});
-    if(queryError){setError(queryError.message);setLoading(false);return;}
+    const [inventoryResult,activeResult,historyResult]=await Promise.all([
+      supabase.from('tools_inventory')
+        .select('id,tool_name,specification,quantity').order('created_at',{ascending:false}),
+      supabase.from('tool_usage').select('id,tool_id,quantity')
+        .eq('usage_status','Dipakai'),
+      supabase.from('tool_usage')
+        .select('id,tool_id,operator_name,machine,quantity,item_condition,usage_status,return_condition,created_at,returned_at')
+        .order('created_at',{ascending:false}).limit(100)
+    ]);
+    const errors=[inventoryResult.error,activeResult.error,historyResult.error].filter(Boolean);
+    if(errors.length){setError(errors.map(result=>result.message).join(' '));setLoading(false);return;}
     setError('');
-    setRecords(data);
+    setRecords(inventoryResult.data);
+    setActiveUsage(activeResult.data);
+    setUsageHistory(historyResult.data);
     setLoading(false);
   },[]);
-  useEffect(()=>{refresh();},[refresh]);
+  useEffect(()=>{
+    refresh();
+    const channel=supabase.channel('admin-tools-live')
+      .on('postgres_changes',{event:'*',schema:'public',table:'tools_inventory'},refresh)
+      .on('postgres_changes',{event:'*',schema:'public',table:'tool_usage'},refresh)
+      .subscribe(status=>{if(status==='CHANNEL_ERROR')setError('Koneksi realtime inventori tools gagal.');});
+    return ()=>{supabase.removeChannel(channel);};
+  },[refresh]);
   const closeModal=()=>{
     setModal(false);
     setEditingId(null);
@@ -595,11 +909,20 @@ function AdminInventory() {
     setSaving(false);
     closeModal();
   };
+  const activeQuantity=activeUsage.reduce((total,usage)=>total+usage.quantity,0);
+  const activeByTool=activeUsage.reduce((totals,usage)=>{
+    totals[usage.tool_id]=(totals[usage.tool_id]||0)+usage.quantity;
+    return totals;
+  },{});
   return <div>
     <div className="page-title"><div><span>Stok &amp; Tracking</span><h1>Inventori Tools</h1></div><button className="primary-btn" onClick={()=>setModal(true)}><Plus size={16}/> Tambah Item</button></div>
-    <div className="kpi-grid"><div className="kpi-card"><span>Total Jenis Tools</span><strong>{records.length}</strong></div><div className="kpi-card"><span>Total Jumlah</span><strong>{records.reduce((total,record)=>total+record.quantity,0)}</strong><small>pcs</small></div></div>
+    <div className="kpi-grid"><div className="kpi-card"><span>Total Jenis Tools</span><strong>{records.length}</strong></div><div className="kpi-card"><span>Stok Tersedia</span><strong>{records.reduce((total,record)=>total+record.quantity,0)}</strong><small>pcs</small></div><div className="kpi-card"><span>Pemakaian Aktif</span><strong>{activeQuantity}</strong><small>pcs sedang dipakai operator</small></div></div>
     <SyncError error={error}/>
-    <div className="panel"><div className="panel-head"><h3>Stok Inventori</h3></div><div className="table-wrap"><table><thead><tr><th>Nama Tools</th><th>Spesifikasi</th><th>Jumlah</th><th>Aksi</th></tr></thead><tbody>{records.map(record=><tr key={record.id}><td>{record.tool_name}</td><td>{record.specification}</td><td>{record.quantity}</td><td><button className="text-btn" onClick={()=>openEdit(record)}>Edit</button></td></tr>)}</tbody></table>{loading&&<p className="table-message">Memuat data...</p>}{!loading&&!records.length&&!error&&<p className="table-message">Belum ada item. Klik “Tambah Item” untuk memulai.</p>}</div></div>
+    <div className="panel"><div className="panel-head"><h3>Stok Inventori</h3></div><div className="table-wrap"><table><thead><tr><th>Nama Tools</th><th>Spesifikasi</th><th>Stok Tersedia</th><th>Pemakaian Aktif</th><th>Aksi</th></tr></thead><tbody>{records.map(record=><tr key={record.id}><td>{record.tool_name}</td><td>{record.specification}</td><td>{record.quantity} pcs</td><td>{activeByTool[record.id]||0} pcs</td><td><button className="text-btn" onClick={()=>openEdit(record)}>Edit</button></td></tr>)}</tbody></table>{loading&&<p className="table-message">Memuat data...</p>}{!loading&&!records.length&&!error&&<p className="table-message">Belum ada item. Klik “Tambah Item” untuk memulai.</p>}</div></div>
+    <div className="panel tool-history-panel"><div className="panel-head"><h3>Riwayat Pemakaian Tools</h3></div><div className="table-wrap"><table><thead><tr><th>Waktu Ambil</th><th>Nama Tools</th><th>Operator</th><th>Mesin</th><th>Qty</th><th>Kondisi Ambil</th><th>Status</th><th>Kondisi Kembali</th><th>Waktu Kembali</th></tr></thead><tbody>{usageHistory.map(usage=>{
+      const item=records.find(record=>record.id===usage.tool_id);
+      return <tr key={usage.id}><td>{formatAttendanceTimestamp(usage.created_at)}</td><td>{item?`${item.tool_name} · ${item.specification}`:'Tools'}</td><td>{usage.operator_name}</td><td>{usage.machine}</td><td>{usage.quantity} pcs</td><td>{usage.item_condition}</td><td>{usage.usage_status}</td><td>{usage.return_condition||'—'}</td><td>{formatAttendanceTimestamp(usage.returned_at)}</td></tr>;
+    })}</tbody></table>{!loading&&!usageHistory.length&&!error&&<p className="table-message">Belum ada transaksi pemakaian tools.</p>}</div></div>
     {modal&&<Modal title={editingId?'Edit Tools':'Tambah Item Tools'} onClose={closeModal}>
       <form className="form-grid" onSubmit={saveTool}>
         {error&&<div className="sync-error form-alert" role="alert">Gagal menyimpan: {error}</div>}

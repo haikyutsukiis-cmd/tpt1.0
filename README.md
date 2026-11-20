@@ -6,8 +6,7 @@ Web client for the machining production system. Authentication and shared attend
 
 1. Create a Supabase project.
 2. Copy `.env.example` to `.env.local` and set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` from the Supabase project settings.
-3. Run `supabase/migrations/20261119000000_initial.sql` in the Supabase SQL Editor. It creates all required tables, including Master Data and Tools Inventory.
-   If you already ran an earlier version of this migration, run the updated file again in the SQL Editor to add the new tables and permissions.
+3. Apply the files in `supabase/migrations` in timestamp order in the Supabase SQL Editor. For an existing project, apply any migrations that have not yet been run; the latest adds Master Data production/shipping quantities and the Admin-only material inventory.
 4. Create each user in Supabase Authentication, then create its `public.profiles` row using that Auth user's UUID:
 
    ```sql
@@ -38,4 +37,4 @@ Import this repository into Vercel. Use the Vite defaults (`npm run build`, outp
 
 ## Data coverage
 
-Operator authentication, attendance timestamps, production submissions, Admin verification, master customer/item/PO data, and tools inventory are stored in Supabase. Other screens that still show sample/demo data (including parts of payroll calculation) need their own database workflows before they represent live operational records.
+Operator authentication, attendance timestamps, production submissions and Admin corrections/verifications, master customer/item/PO data with production progress and shipped quantities, tools inventory, material inventory, and operator tool usage are stored in Supabase. Outstanding quantities shown to operators are calculated as target quantity minus shipped quantity. Material inventory stores either a quantity in pcs or a quantity in bars with its total pcs equivalent. Taking tools records the operator and reduces available stock atomically; returning tools in usable condition adds them back to stock. Other screens that still show sample/demo data (including parts of payroll calculation) need their own database workflows before they represent live operational records.

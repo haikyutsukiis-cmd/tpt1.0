@@ -67,6 +67,22 @@ create table if not exists public.tools_inventory (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.tool_usage (
+  id uuid primary key default gen_random_uuid(),
+  tool_id uuid not null references public.tools_inventory(id) on delete restrict,
+  operator_id uuid not null references public.profiles(id),
+  operator_name text not null,
+  machine text not null,
+  quantity integer not null check (quantity > 0),
+  item_condition text not null check (item_condition in ('Baru', 'Bekas')),
+  usage_status text not null default 'Dipakai'
+    check (usage_status in ('Dipakai', 'Dikembalikan')),
+  return_condition text
+    check (return_condition in ('Tumpul', 'Patah', 'Masih Layak / Bekas')),
+  created_at timestamptz not null default now(),
+  returned_at timestamptz
+);
+
 create index if not exists attendance_records_shift_date_idx
   on public.attendance_records (shift_date desc);
 create index if not exists production_reports_created_at_idx
@@ -75,12 +91,17 @@ create index if not exists master_data_created_at_idx
   on public.master_data (created_at desc);
 create index if not exists tools_inventory_created_at_idx
   on public.tools_inventory (created_at desc);
+create index if not exists tool_usage_tool_status_idx
+  on public.tool_usage (tool_id, usage_status);
+create index if not exists tool_usage_operator_created_at_idx
+  on public.tool_usage (operator_id, created_at desc);
 
 alter table public.profiles enable row level security;
 alter table public.attendance_records enable row level security;
 alter table public.production_reports enable row level security;
 alter table public.master_data enable row level security;
 alter table public.tools_inventory enable row level security;
+alter table public.tool_usage enable row level security;
 
 drop policy if exists "users can read their own profile" on public.profiles;
 drop policy if exists "operators and managers can read attendance" on public.attendance_records;
@@ -89,6 +110,8 @@ drop policy if exists "operators and managers can read production" on public.pro
 drop policy if exists "admins can review production" on public.production_reports;
 drop policy if exists "admins can manage master data" on public.master_data;
 drop policy if exists "admins can manage tools inventory" on public.tools_inventory;
+drop policy if exists "operators can read tools inventory" on public.tools_inventory;
+drop policy if exists "operators and admins can read tool usage" on public.tool_usage;
 
 create policy "users can read their own profile"
   on public.profiles for select to authenticated
@@ -128,6 +151,17 @@ create policy "admins can manage tools inventory"
   using (public.current_profile_role() = 'admin')
   with check (public.current_profile_role() = 'admin');
 
+create policy "operators can read tools inventory"
+  on public.tools_inventory for select to authenticated
+  using (public.current_profile_role() = 'operator');
+
+create policy "operators and admins can read tool usage"
+  on public.tool_usage for select to authenticated
+  using (
+    public.current_profile_role() = 'admin'
+    or operator_id = auth.uid()
+  );
+
 grant select on public.profiles to authenticated;
 grant select on public.attendance_records to authenticated;
 grant update (verification_status, reviewed_at) on public.attendance_records to authenticated;
@@ -135,6 +169,7 @@ grant select on public.production_reports to authenticated;
 grant update (verification_status, reviewed_at) on public.production_reports to authenticated;
 grant select, insert, update, delete on public.master_data to authenticated;
 grant select, insert, update, delete on public.tools_inventory to authenticated;
+grant select on public.tool_usage to authenticated;
 
 create or replace function public.operator_clock_in(p_shift_date date)
 returns public.attendance_records
@@ -247,12 +282,109 @@ begin
 end;
 $$;
 
+create or replace function public.operator_take_tool(
+  p_tool_id uuid,
+  p_quantity integer,
+  p_machine text,
+  p_item_condition text
+)
+returns public.tool_usage
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  result public.tool_usage;
+  profile_name text;
+begin
+  if public.current_profile_role() <> 'operator' then
+    raise exception 'Only operator accounts can take tools';
+  end if;
+  if p_quantity is null or p_quantity <= 0 then
+    raise exception 'Tool quantity must be greater than zero';
+  end if;
+  if nullif(trim(p_machine), '') is null then
+    raise exception 'Machine is required';
+  end if;
+  if p_item_condition is null or p_item_condition not in ('Baru', 'Bekas') then
+    raise exception 'Invalid tool condition';
+  end if;
+
+  update public.tools_inventory
+  set quantity = quantity - p_quantity
+  where id = p_tool_id and quantity >= p_quantity;
+  if not found then
+    raise exception 'Tool not found or available stock is insufficient';
+  end if;
+
+  select display_name into profile_name
+  from public.profiles where id = auth.uid();
+
+  insert into public.tool_usage (
+    tool_id, operator_id, operator_name, machine, quantity, item_condition
+  ) values (
+    p_tool_id, auth.uid(), profile_name, trim(p_machine), p_quantity, p_item_condition
+  )
+  returning * into result;
+  return result;
+end;
+$$;
+
+create or replace function public.operator_return_tool(
+  p_usage_id uuid,
+  p_return_condition text
+)
+returns public.tool_usage
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  usage_record public.tool_usage;
+  result public.tool_usage;
+begin
+  if public.current_profile_role() <> 'operator' then
+    raise exception 'Only operator accounts can return tools';
+  end if;
+  if p_return_condition is null or
+     p_return_condition not in ('Tumpul', 'Patah', 'Masih Layak / Bekas') then
+    raise exception 'Invalid return condition';
+  end if;
+
+  select * into usage_record
+  from public.tool_usage
+  where id = p_usage_id and operator_id = auth.uid() and usage_status = 'Dipakai'
+  for update;
+  if not found then
+    raise exception 'Active tool usage record not found';
+  end if;
+
+  update public.tool_usage
+  set usage_status = 'Dikembalikan',
+      return_condition = p_return_condition,
+      returned_at = now()
+  where id = usage_record.id
+  returning * into result;
+
+  if p_return_condition = 'Masih Layak / Bekas' then
+    update public.tools_inventory
+    set quantity = quantity + usage_record.quantity
+    where id = usage_record.tool_id;
+  end if;
+  return result;
+end;
+$$;
+
 revoke all on function public.operator_clock_in(date) from public;
 revoke all on function public.operator_clock_out(uuid) from public;
 revoke all on function public.operator_submit_production_report(text, text, text, integer, integer, integer) from public;
+revoke all on function public.operator_take_tool(uuid, integer, text, text) from public;
+revoke all on function public.operator_return_tool(uuid, text) from public;
 grant execute on function public.operator_clock_in(date) to authenticated;
 grant execute on function public.operator_clock_out(uuid) to authenticated;
 grant execute on function public.operator_submit_production_report(text, text, text, integer, integer, integer) to authenticated;
+grant execute on function public.operator_take_tool(uuid, integer, text, text) to authenticated;
+grant execute on function public.operator_return_tool(uuid, text) to authenticated;
 
 do $$
 begin
@@ -271,6 +403,22 @@ begin
       and tablename = 'production_reports'
   ) then
     execute 'alter publication supabase_realtime add table public.production_reports';
+  end if;
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'tools_inventory'
+  ) then
+    execute 'alter publication supabase_realtime add table public.tools_inventory';
+  end if;
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime'
+      and schemaname = 'public'
+      and tablename = 'tool_usage'
+  ) then
+    execute 'alter publication supabase_realtime add table public.tool_usage';
   end if;
 end
 $$;
